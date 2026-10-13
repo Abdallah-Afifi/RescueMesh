@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Experiment output (keep summaries, not raw runs)
+/results/raw/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Word and Docs lock files
+~$*
