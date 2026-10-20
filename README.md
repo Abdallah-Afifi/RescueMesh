@@ -9,7 +9,7 @@ The project is graded on distributed-systems design, measurement and documentati
 | Phase | Due | State |
 |---|---|---|
 | 0. Election algorithms survey | 4 Oct 2026 | Submitted. Revised after review (version 2). |
-| 1. Cloud processing, load balancing, fault tolerance | 4 Nov 2026, 8 PM | Planned: see `docs/phase1-plan.md`. No code yet. |
+| 1. Cloud processing, load balancing, fault tolerance | 4 Nov 2026, 8 PM | Interfaces agreed and implemented in `crates/proto`; modules in progress. See `docs/phase1-plan.md`. |
 | 2. Discovery, P2P, offline reconciliation | 5 Dec 2026, 8 PM | Not started. |
 
 ## Where things are
@@ -18,12 +18,31 @@ The project is graded on distributed-systems design, measurement and documentati
 |---|---|
 | `docs/spec/RescueMesh_Term_Project_v2.pdf` | The project description from the instructor. |
 | `docs/protocol-v2.md` | The cloud protocol we implement in Phase 1. Start here. |
+| `config/` | Run configuration: `cluster.example.toml` for the six machines, `local.toml` for one machine. |
 | `docs/phase1-plan.md` | Phase 1 requirements, who owns what, interfaces, schedule. |
 | `docs/design-log.md` | Every design decision, the alternatives, and the reason. Add an entry whenever a decision is made or changed. |
 | `docs/phase0/104_survey_v1_submitted.pdf` | The survey exactly as submitted. Do not edit. |
 | `docs/phase0/104_survey_v2.docx` | The corrected survey, for reuse in the Phase 1 and final reports. |
 | `docs/phase0/survey-errata.md` | What changed between the two survey versions, with sources. |
 | `docs/phase0/figures/` | The request-flow figure used in the survey and the script that draws it. |
+
+## Building
+
+Install Rust with [rustup](https://rustup.rs). The compiler version is pinned in `rust-toolchain.toml`, and rustup installs it on first use.
+
+```sh
+cargo test --workspace                                  # all tests
+cargo clippy --workspace --all-targets -- -D warnings   # lint, as CI does
+cargo run -p node -- --config config/local.toml --id 1  # one cloud node
+```
+
+| Crate | Owner | Purpose |
+|---|---|---|
+| `crates/proto` | shared | Types, messages, traits, config, event schema. Changes need a design-log entry. |
+| `crates/node` | A–D | Cloud node binary `rm-node` |
+| `crates/client` | E | Client middleware library |
+| `crates/loadgen` | E | Workload generator and frontend `rm-loadgen` |
+| `crates/ctl` | A | Operator tool `rm-ctl` (status, targeted silence) |
 
 ## Working agreements
 

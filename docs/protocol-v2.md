@@ -71,6 +71,7 @@ S_i = w_q * min(q_i / Q_MAX, 1)      queue length
 - `q`, `c`, `s` travel on heartbeats. `rtt` travels in the request, because it is per client and cannot ride on server heartbeats.
 - **Local correction:** when ranking, a node adds to `q_i` the number of `CLAIM`s it has seen from node `i` since `i`'s last heartbeat. This stops every request in one heartbeat interval from going to the same node.
 - Scores are quantised to steps of 0.05.
+- In code every term, weight and the quantization step are integers in thousandths, so all nodes compute identical claim keys (design log DL-023).
 - **Tie-break:** lower `hash(reqID, nodeID)` wins. A static-ID tie-break sends everything to one node when the cluster is idle.
 
 The selection rule is a pluggable function `rank(reqID, view, scores)`, so the baselines in Section 10 are alternative implementations of the same interface.
@@ -187,10 +188,19 @@ The node is "sufficiently current" exactly when it applies the entry that re-adm
 - **Majority.** With two nodes down nothing commits. This is outside the single-failure model.
 - **Memory.** The log and state are held in memory, which matches the failure model. A real process crash is not covered unless the log is also written to disk.
 
-## 13. Still to decide
+## 13. Decided implementation details
 
-- Wire format and transport (TCP with length-prefixed frames is the default assumption).
-- Concrete starting values for `T_d` bounds, `T_c`, `T_base`, `L`, client timeout, `Q_MAX`, `S_MAX`, `R_MAX`, and the weights.
-- Log trimming interval and snapshot format.
-- Parallelisation model for client and server (async I/O plus a bounded planning pool with backpressure is the working assumption; Phase 1 requires it to be documented).
-- The planning algorithm itself.
+The questions this section used to list were settled on 2026-10-20; see design log DL-014 to DL-029:
+
+- Transport, acknowledgment and wire format: DL-014, DL-015.
+- Starting timeout and cap values: DL-024.
+- Snapshots: none in Phase 1 (DL-022).
+- Parallelization model: DL-017 (cloud node), DL-018 (clients).
+- Planning algorithm: DL-020.
+
+The types, messages and configuration they describe are implemented in `crates/proto`.
+
+Still open, waiting on the instructor:
+- Whether a victim chosen by the elected coordinator satisfies "elect one machine to ignore communication" (DL-011).
+- Whether a simulated user may be a task inside a process (DL-018).
+- Which six machines the demo uses.

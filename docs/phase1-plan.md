@@ -79,16 +79,13 @@ Everything below is taken from `spec/RescueMesh_Term_Project_v2.pdf`; page numbe
 - Rust; middleware and libraries must not hide the mechanisms being assessed.
 - Demo setup: three cloud machines and three client machines, each client machine running many simulated user processes from one frontend.
 
-### 1.3 Decisions still open (from `protocol-v2.md` Section 13)
+### 1.3 Decisions (settled 20 October)
 
-These must be settled in the first two days because everyone's code depends on them:
+The open decisions were settled on 20 October; see design log DL-014 to DL-029. The shared interfaces are in `crates/proto`, which builds and passes its tests, so M0 is complete except for three questions to the instructor:
 
-- Transport and wire format.
-- Starting values for every timeout and cap.
-- Log trimming and snapshots. Proposal: keep the whole log in memory for Phase 1 and catch up by log suffix only. A run of tens of thousands of entries fits easily. Snapshots become a stretch goal.
-- The parallelization model.
-- The planning algorithm.
-- The instructor's reading of "elect one machine to ignore communication" (design log DL-011).
+- whether a victim chosen by the elected coordinator satisfies "elect one machine to ignore communication" (DL-011);
+- whether a simulated user may be a task inside a process (DL-018);
+- which six machines the demo uses.
 
 ### 1.4 The nodes are separate physical machines
 

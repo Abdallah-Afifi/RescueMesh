@@ -21,7 +21,7 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-003. Commits are ordered by the coordinator in a replicated log
 
-- Date: 2026-10-13. Status: proposed (Abdallah); team to confirm.
+- Date: 2026-10-13. Status: agreed 2026-10-20 (proposed 2026-10-13).
 - Supersedes: DL-002 "any executor commits after one peer ack" and "coordinator off the request path".
 - Problem: the survey used a single "state version" for planning, recovery and the election key, but nothing ordered commits. Example: node 1 commits A through node 2 while node 2 commits B through node 3. Node 1 holds {A}, node 3 holds {B}; there is no version and no replay order.
 - Decision: the executor sends its result to the coordinator, which assigns a sequence number, checks resource versions and replicates. The reply goes out after a majority holds the entry. The coordinator is on the commit path, not the compute path.
@@ -33,7 +33,7 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-004. One result per request is enforced at the sequencer
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Supersedes: DL-002 "first committed result wins".
 - Problem: with two executors for one request, each could refuse the other's result (client never answered) or each could accept (two different plans). The determinism argument fails because the two may plan from different snapshots.
 - Decision: the coordinator returns the existing result for any `reqID` already in its log. Stated as invariant I1.
@@ -41,7 +41,7 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-005. Resource-version check at commit
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Problem: two different requests planned from the same snapshot could both assign the same resource. Idempotency by request ID does not cover this.
 - Decision: a plan carries the versions of the resources it read; the coordinator rejects it if any is out of date and the executor plans again. Stated as invariant I3.
 - Alternative: lock resources during planning. Rejected: holds locks across a long computation and across a possible executor failure.
@@ -49,7 +49,7 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-006. Agreed membership view; "suspected" is not a node state
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Supersedes: DL-002 node states.
 - Problem: each node ranked its own private idea of who was active. The epoch changed only on coordinator elections, so a returning non-coordinator still had a valid epoch and its claims were accepted. A silence shorter than the suspicion threshold never triggered a resync.
 - Decision: the view `(viewNo, activeSet)` changes only through committed log entries. Claims carry `viewNo`. Heartbeats carry `viewNo` and `commitIndex`. An injected node always resyncs on wake-up.
@@ -57,7 +57,7 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-007. Takeover on view change, not on elapsed time
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Supersedes: DL-002 watchdog `T_w`.
 - Problem: under load a queued request looked like a dead executor, so the next node re-executed it and doubled the load. With cached scores, a silenced node's frozen score could keep it ranked first for every request until it was suspected.
 - Decision: a short claim timeout `T_c` (a few round trips) covers "nobody claimed". A claimed request is taken over only when the claimer is removed from the view. The request table has states SEEN / CLAIMED / COMMITTED so a client retry cannot start a second execution.
@@ -65,7 +65,7 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-008. Hash tie-break and local score correction
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Supersedes: DL-002 static-ID tie-break.
 - Problem: with quantised scores and a static-ID tie-break, one node receives every request when the cluster is idle. With scores cached for a heartbeat interval, all nodes agree on the same "best" node for the whole interval.
 - Decision: tie-break by `hash(reqID, nodeID)`; add claims seen since a peer's last heartbeat to that peer's queue length.
@@ -73,20 +73,20 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-009. Score inputs made obtainable
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Problem: client RTT is per client and cannot ride on server heartbeats; "normalised to [0, 1]" was undefined for queue length and service time; the failure-rate term was self-reported.
 - Decision: the client measures RTT per server and sends it in the request; cluster-wide caps `Q_MAX`, `S_MAX`, `R_MAX` define normalisation; the reliability term is the heartbeat miss ratio observed by the ranking node.
 
 ## DL-010. Coordinator election details
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Problem: with one node silenced, the two remaining nodes could both stand in the same epoch and refuse each other, with no retry rule. The survey also said both that a new leader must wait for the old lease and that failover takes detection plus two round trips.
 - Decision: candidacy delay ordered by ID plus random jitter; random backoff and a new epoch on failure; vote key `(lastEntryEpoch, lastSeq)`. Safety comes from the majority rule and the epoch, because every coordinator action is a log entry; the lease only makes a cut-off coordinator stop sooner. No lease wait before the new coordinator acts.
 - Alternative: lease-based safety. Rejected: adds a clock assumption we do not need.
 
 ## DL-011. Fault injection through the log
 
-- Date: 2026-10-13. Status: proposed. Open question for the instructor.
+- Date: 2026-10-13. Status: agreed 2026-10-20. Open question for the instructor.
 - Supersedes: DL-002 seeded generator held by the coordinator.
 - Problem: repeatability broke when the coordinator changed; nothing prevented silencing a node while another was still syncing; no way to target a specific node for the required demo.
 - Decision: victim and duration are derived from `hash(seed, k)`, with the counter `k` in replicated state; injection only when all three nodes are active; an operator `SILENCE` command for targeted injection.
@@ -94,14 +94,188 @@ Status values: proposed (one member), agreed (team), superseded.
 
 ## DL-012. Recovery completes when the node applies its re-admission entry
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Supersedes: DL-002 "matches the donor's committed version at the time of the check" and "donor named by the coordinator".
 - Problem: under sustained load the donor's version keeps moving; rejoin blocked whenever a coordinator election was running.
 - Decision: the joining node takes the missing suffix (or snapshot) from any active node while buffering live entries; the coordinator re-admits it with a `VIEW` entry; the node is active when it applies that entry.
 
 ## DL-013. Evaluation baselines and method
 
-- Date: 2026-10-13. Status: proposed.
+- Date: 2026-10-13. Status: agreed 2026-10-20.
 - Supersedes: survey Section 7.8 baselines.
 - Problem: plain Bully and a per-request ring are easy to beat and cannot show that a metric election is better than a zero-message policy.
 - Decision: baselines are random, hash, round-robin, two-choices and always-highest-ID. Failover is measured as a latency excursion. Fairness uses busy time. Five or more seeds with confidence intervals. One failure detector (φ-accrual); the ring baseline and the second detector are dropped to fit the Phase 1 schedule.
+
+---
+
+Entries DL-014 to DL-029 settle the decisions left open by `protocol-v2.md` Section 13. Agreed by the team on 2026-10-20 with the instruction to prefer the robust option where there was a choice. The shared types, traits, config and event schema they describe are implemented in `crates/proto`.
+
+## DL-014. Transport: TCP for messages, UDP for heartbeats, application-level acknowledgment
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - TCP between clients and nodes and between nodes, one connection per peer, frames prefixed with a 4-byte length (limit 16 MiB).
+  - Heartbeats are UDP datagrams of at most 1200 bytes, sent from a dedicated thread.
+  - Every node-to-node message has a per-peer sequence number. Every message carries a cumulative `ack_up_to`; unacknowledged messages are retransmitted every `retransmit_ms` until acknowledged or until the peer leaves the view. A bare `Ack` goes out after `ack_delay_ms` when there is nothing else to send.
+  - Client "multicast" is one send to each of the three addresses; IP multicast is not used (see DL-026).
+- Alternatives: everything over TCP; everything over UDP with our own reliability; one acknowledgment message per message.
+- Reason:
+  - Heartbeats on their own socket cannot queue behind large replication messages, and losing one is harmless.
+  - A silenced node still accepts TCP data and drops it inside the process, so delivery must be confirmed by the application.
+  - Cumulative acknowledgments piggybacked on normal traffic add no messages in steady state, so the per-request message counts in Section 6.2 of the survey still hold.
+
+## DL-015. Wire format: postcard, with JSON for debugging
+
+- Date: 2026-10-20. Status: agreed.
+- Decision: message bodies are encoded with `postcard` 1.x. `run.wire_format = "json"` switches every process to JSON for debugging. Every frame and heartbeat carries `PROTOCOL_VERSION`; mismatched versions are dropped and logged.
+- Alternatives: bincode; protobuf; JSON only.
+- Reason: postcard's 1.x wire format is documented and declared stable, it is compact, and it works directly with `serde`. Protobuf would add a schema compiler for no benefit inside one Rust code base. JSON alone is several times larger and slower to parse at tens of thousands of requests.
+
+## DL-016. Rust stack and toolchain
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - `tokio` for asynchronous I/O, `serde` for serialization, `clap` for command lines, `toml` for configuration.
+  - The event log is written by our own code, not a logging framework, so its format is exactly the schema in DL-028.
+  - The compiler is pinned to Rust 1.99.1 in `rust-toolchain.toml`, edition 2024, and `unsafe` code is forbidden.
+  - CI runs formatting, clippy with warnings as errors, and all tests on every push.
+- Reason: these libraries do I/O plumbing and parsing only, so none of them hides a mechanism being assessed (project description p. 8). A pinned compiler means all six machines build the same binary behaviour.
+
+## DL-017. Cloud-node parallelization model
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - One asynchronous task per connection.
+  - A single **core task** owns all protocol state: the log, commit position, view, epoch, request table and peer scores. Other tasks talk to it through channels, so the core needs no locks.
+  - Planning runs on a bounded pool of (cores − 1) threads by default (`planner.worker_threads`). Planning threads receive an immutable snapshot and return a result to the core; they never touch shared state.
+  - When the planning queue is full (`planner.queue_capacity`), the node replies `Busy` and the client backs off.
+  - Heartbeats are sent and received on a dedicated OS thread.
+- Alternatives: shared state behind locks; one thread per request; planning on the asynchronous runtime.
+- Reason: a single owner makes the protocol state easy to reason about and test. A bounded pool gives backpressure and the queue length the score needs. Keeping heartbeats off the busy threads prevents false suspicion under load.
+
+## DL-018. Client parallelization model
+
+- Date: 2026-10-20. Status: agreed. Open question for the instructor.
+- Decision: on each client machine the frontend starts K operating-system processes, each running M simulated users as asynchronous tasks (for example 20 × 50). Each user has its own `ClientId` and sequence numbers.
+- Alternative: one operating-system process per simulated user.
+- Reason: thousands of separate processes would exhaust client-machine resources before the servers saturate, and the measurements would then describe the clients. Open: confirm that a user as a task inside a process satisfies "simulated user processes".
+
+## DL-019. Operations and read semantics
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - The operations are `ReportIncident` (runs the planner), `OfferResource`, `UpdateResource` and `Query`.
+  - Every operation that changes state follows the same claim, propose and commit path.
+  - Queries are answered by any node from its applied state and may be slightly behind the coordinator. This is documented as the read consistency of Phase 1.
+- Alternative: route reads through the coordinator for up-to-date answers. Rejected for Phase 1: it puts the coordinator on every read and is not needed by any required scenario.
+
+## DL-020. Planning algorithm
+
+- Date: 2026-10-20. Status: agreed. Owner: Youssef.
+- Decision:
+  - Campus map: a synthetic weighted graph of 30 zones; shortest paths by Dijkstra.
+  - Priority: an integer weighted sum of severity, age (relative to the request's own timestamp), distance, resource availability and responder capability.
+  - Assignment: the Hungarian algorithm over the top-K pending incidents and the available resources. Its cost grows about as K³, so `planner.top_k` is the cost knob.
+  - Output: priority, assignments and a route.
+- Determinism rules: integer arithmetic only, ties broken by ID, `BTreeMap` for all collections that are iterated, no clock or random numbers.
+- Alternatives: greedy assignment (too cheap to load the servers); a linear-programming solver (a library would hide the computation and is hard to make deterministic).
+
+## DL-021. Identifiers
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - `NodeId` 1–3.
+  - `ClientId` = (client machine, process, user).
+  - `ReqId` = (`ClientId`, incarnation, sequence number), where the incarnation is random at process start.
+  - An incident's or resource's ID is the `ReqId` of the request that created it.
+  - Node-to-node messages carry `MsgId` = (sender incarnation, per-peer counter).
+- Reason: this satisfies "every state-changing operation has an unambiguous identifier" without any central allocator, and a restarted client can never reuse an ID.
+
+## DL-022. No snapshots in Phase 1
+
+- Date: 2026-10-20. Status: agreed.
+- Decision: the whole log stays in memory and a rejoining node catches up from the log alone. Snapshot transfer is a stretch goal.
+- Reason: a run of tens of thousands of entries fits easily in memory, and this removes the riskiest part of rejoin from the critical path.
+
+## DL-023. Determinism rules for anything nodes compare
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - Cross-node hashes use 64-bit FNV-1a over an explicit byte encoding, pinned by tests (`proto::hash`). Rust's `DefaultHasher` is never used for these, because it is not guaranteed stable across versions.
+  - Load metrics, score weights and quantization are integers in thousandths, so every node computes the identical claim key.
+  - `Ranker` and `Planner` implementations are pure functions of their inputs. Policies that look random draw from the request hash, never from a random-number generator; round-robin derives its position from the request ID.
+  - The fault-injection victim, duration and interval come from `hash(seed, k)`.
+- Reason: two nodes that disagree on a ranking produce competing claims, and two nodes that disagree on a plan break the determinism the project description asks for. These rules remove both sources of disagreement.
+
+## DL-024. Starting values for timeouts and caps
+
+- Date: 2026-10-20. Status: agreed. To be tuned by measurement; later changes get their own entries.
+- Values (all in `proto::config` defaults):
+
+| Parameter | Value |
+|---|---|
+| Heartbeat interval | 100 ms |
+| Failure detector | φ threshold 8; timeout clamped to 300–1000 ms |
+| Claim timeout | 3 × peer RTT, at least 20 ms |
+| Candidacy delay | 150 ms × (3 − node ID) + 0–150 ms jitter |
+| Election back-off | 150–300 ms |
+| Coordinator lease | 250 ms |
+| PROPOSE retry | 200 ms |
+| Re-plans per request | at most 3 |
+| Retransmit / bare-ack delay | 100 ms / 20 ms |
+| Client timeout | 2 s initially, then 3 × observed p99; backoff × 2 with jitter; at most 4 retries |
+| Score caps | queue 64, service time 500 ms, RTT 50 ms |
+| Score weights | 200 each (thousandths) |
+| Quantization | 50 thousandths (0.05) |
+| Planner | 30 zones, top_k 100, queue capacity 256 |
+
+- Change from the proposal: the lease is 250 ms, not 300 ms, so it is strictly shorter than the shortest detection timeout. A cut-off coordinator then always stops acting before a peer can suspect it. `Config::validate` enforces this and the other relations below.
+- Enforced relations: detection floor ≥ 2 heartbeats; lease < detection floor; score weights sum to 1000; quantum divides 1000; injection duration ≤ 20 s; injection interval > longest injection.
+
+## DL-025. Fault-injection schedule
+
+- Date: 2026-10-20. Status: agreed.
+- Decision: the next injection follows 45–75 s after the previous one; the duration is uniform in 1–20 s; both are drawn from `hash(seed, k)`. Injection is off by default and enabled per experiment. The interval must exceed the longest duration, so a node has time to rejoin before the next silence.
+- Reason: several failures per run, without the system being degraded most of the time, and every fault sequence replayable from the seed.
+
+## DL-026. Deployment on six machines: clocks and multicast
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - All six machines run chrony against the same source. Each process logs its measured clock offset at the start and end of a run (`clock_offset` event).
+  - Each process logs its hardware once (`machine_info` event).
+  - IP multicast is not used anywhere (DL-014).
+- Reason: failover timelines combine events from several machines, so clock error must be measured to be corrected or bounded. Campus networks often block multicast.
+
+## DL-027. One shared configuration file, validated at start-up
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - One TOML file is used unchanged on all six machines; each process learns its own identity from the command line.
+  - Unknown fields are rejected, so a misspelled setting fails loudly instead of silently taking the default.
+  - Every binary calls `Config::validate`, which reports all violated constraints at once.
+  - Templates: `config/cluster.example.toml` for the lab and `config/local.toml` for one machine.
+
+## DL-028. Event-log schema
+
+- Date: 2026-10-20. Status: agreed. Owner: Sara (consumer), everyone (producers).
+- Decision:
+  - One JSON object per line, one file per process.
+  - Common fields: wall-clock and monotonic timestamps, run ID, machine, node, event kind and request ID.
+  - Kind-specific fields are flattened into the same object, and the event kinds are a fixed list in `proto::event::EventKind`. New kinds are added at the end; existing kinds are never renamed.
+  - Every process writes a resource sample once per second.
+- Reason: every number in the report must be computable from these files alone, so the schema is fixed before anyone writes code that emits events.
+
+## DL-029. State ownership
+
+- Date: 2026-10-20. Status: agreed.
+
+| State | Owner | Changed by |
+|---|---|---|
+| Log, commit position, view, epoch | Replication core (Abdallah) | the core task only |
+| Request table, peer scores | Selection (Joudy) | the core task, through the selection module |
+| Incidents, resources, assignments | State machine (Youssef) | applying committed entries only |
+| Connections, retransmission buffers, heartbeat history | Transport (Hanna) | transport tasks and the heartbeat thread |
+| Client sequence numbers, RTT estimates | Client middleware (Sara) | the client process |
+
+- Reason: the project description asks for state ownership to be defined explicitly (p. 6), and a single owner per piece of state is what makes the single-core-task model of DL-017 work.
