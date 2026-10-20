@@ -8,7 +8,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the pinned toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
       - name: Format
