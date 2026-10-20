@@ -90,6 +90,28 @@ These must be settled in the first two days because everyone's code depends on t
 - The planning algorithm.
 - The instructor's reading of "elect one machine to ignore communication" (design log DL-011).
 
+### 1.4 The nodes are separate physical machines
+
+The project description fixes the environment: three physical machines run the three cloud nodes, and three more run the client frontends and the simulated users (pp. 2, 4). Each cloud node is therefore one process on its own computer, talking over a real network. The description does not say whose computers these are, so confirm with the instructor whether the demo uses lab machines or our own laptops.
+
+This changes how the system has to be built and measured:
+
+- **Nothing hard-coded to one host.** Node IDs map to IP addresses and ports in the config file. Localhost with three processes is only for development; every milestone from M2 on runs across machines.
+- **No reliance on IP multicast.** Campus and lab networks often block it. "Multicast to the cloud" is implemented in the client middleware as one send to each of the three addresses.
+- **Clocks differ between machines.** Protocol safety does not depend on clocks (design log DL-010), but measurements do.
+  - Request latency is timed on the client's clock only.
+  - Timelines that combine events from several machines, such as failover, need the clocks aligned. Run NTP or chrony on all six machines and log each machine's measured offset with every run.
+- **Machines may differ in speed.** Record each machine's hardware with every run. Fairness is judged against capacity, not equal shares (protocol Section 10).
+- **The client machines can become the bottleneck.** Thousands of client processes on three computers can exhaust client CPU, file descriptors or ports before the servers saturate. Log client-machine CPU too, so we can show that measured limits are on the server side.
+- **The failure is a silent process, not a pulled cable.** The injected node keeps running and ignores all traffic in our transport layer, which is what the description asks for.
+- **Deployment must be scripted.**
+  - The Rust binaries have to build and start on all six machines, which may run different operating systems.
+  - Logs have to come back to one place after each run.
+  - A run must start from one command; starting six terminals by hand will not survive repeated experiments.
+- **Firewalls.** Our ports must be open between all six machines; check this before M2.
+
+Owners: A for deployment scripts and the machine config, B for addressing and transport over the real network, E for clock offsets, hardware records and client-machine monitoring in the measurement pipeline.
+
 ## 2. Work split
 
 The work is split along the architecture so each person owns a module end to end: code, tests, its demo scenario, its measurements and its report section. Abdallah takes the largest share (about 30%) because he did not work on Phase 0. Each of the other four takes about 17–18%.
@@ -120,7 +142,7 @@ This is the critical path. Everything that touches shared state goes through it.
 
 **Also owns:**
 - Integration: the Cargo workspace, the end-to-end build, and the shared interfaces in Section 3 below.
-- Deployment and runs on the six lab machines.
+- Deployment scripts, the machine config, and runs on the six physical machines (Section 1.4).
 - Report assembly and final editing.
 
 **Demo scenarios:** server failure, server recovery.
@@ -242,7 +264,7 @@ This is the critical path. Everything that touches shared state goes through it.
 - The raw-data description.
 - Plots, tables and their interpretation.
 
-**Done when** one command runs a full sweep on the lab machines and produces every plot in the report from raw logs.
+**Done when** one command runs a full sweep on the six machines and produces every plot in the report from raw logs.
 
 ### Shared by everyone
 
@@ -288,7 +310,7 @@ results/     summaries committed; raw runs ignored
 |---|---|---|
 | Tue 20 – Thu 22 Oct | **M0: contracts** | Open decisions settled; workspace builds; message crate and traits merged; instructor asked about fault-injection wording. |
 | Fri 23 – Tue 27 Oct | **M1: modules** | Each module works alone with tests. Three nodes run on one machine (localhost) with heartbeats; the planner runs standalone; the load generator talks to a stub server. |
-| Wed 28 – Fri 30 Oct | **M2: integration** | End-to-end request on one machine, then on the six lab machines. Fault injection and rejoin work under load. All five demo scenarios run at least once. |
+| Wed 28 – Fri 30 Oct | **M2: integration** | End-to-end request on one machine, then on the six physical machines with clocks synchronized. Fault injection and rejoin work under load. All five demo scenarios run at least once. |
 | Sat 31 Oct – Mon 2 Nov | **M3: experiments** | Full sweeps with five or more seeds per configuration; raw data collected. **Code freeze Monday night**; after that, bug fixes only. |
 | Tue 3 – Wed 4 Nov | **M4: report and demo** | Report assembled from the owners' sections; demo rehearsed end to end; submit by 8 PM Wednesday. |
 
@@ -304,6 +326,6 @@ Do not cut fault injection, recovery or the measurement pipeline; they are grade
 ## 5. Risks
 
 - **The replication core is the critical path.** If A slips, nothing integrates. Mitigation: A starts with the commit path on a fixed coordinator (no election) so others can integrate by M1. Election and rejoin are added next.
-- **Lab machine access.** Book the six machines for M2 and M3 now, and confirm the network allows our ports.
+- **Access to six machines.** Confirm with the instructor which machines the demo uses, book them for M2 and M3 now, and check that the network allows our ports between them.
 - **Measurements arriving late.** E's pipeline must read logs from day 1 of M1 so every module emits usable events early.
 - **One person knowing a module.** Each module has a reviewer: A reviews B, B reviews C, C reviews D, D reviews E, and E reviews A. Every merge needs that review, which also spreads the knowledge needed for the demo.
