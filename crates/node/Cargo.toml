@@ -1,0 +1,18 @@
+[package]
+name = "node"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rm-node"
+path = "src/main.rs"
+
+[dependencies]
+proto.workspace = true
+clap.workspace = true
+
+
+[lints]
+workspace = true

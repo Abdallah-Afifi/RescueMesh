@@ -1,0 +1,4 @@
+# Every machine builds with the same compiler, so behaviour and timing match.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

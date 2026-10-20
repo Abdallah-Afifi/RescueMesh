@@ -1,0 +1,42 @@
+# Template for runs on the six physical machines. Copy it, set the cloud
+# machines' addresses and a run_id, and use the same file on every machine.
+# Every value not shown here takes the agreed default (crates/proto/src/config.rs).
+
+[run]
+run_id = "example"
+seed = 42
+log_dir = "logs"
+wire_format = "postcard"   # "json" to read traffic while debugging
+
+[[cluster.nodes]]
+id = 1
+host = "10.0.0.11"
+port = 7000
+heartbeat_port = 7100
+
+[[cluster.nodes]]
+id = 2
+host = "10.0.0.12"
+port = 7000
+heartbeat_port = 7100
+
+[[cluster.nodes]]
+id = 3
+host = "10.0.0.13"
+port = 7000
+heartbeat_port = 7100
+
+[timeouts]
+heartbeat_ms = 100
+fd_min_ms = 300
+fd_max_ms = 1000
+lease_ms = 250
+
+[policy]
+ranker = "mwbe_cached"   # mwbe_bids | random | hash | round_robin | two_choices | highest_id
+
+[planner]
+top_k = 100              # cost knob
+
+[inject]
+enabled = false

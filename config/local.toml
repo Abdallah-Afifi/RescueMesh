@@ -1,0 +1,24 @@
+# Three nodes on one machine, for development only.
+
+[run]
+run_id = "local"
+seed = 1
+log_dir = "logs"
+
+[[cluster.nodes]]
+id = 1
+host = "127.0.0.1"
+port = 7001
+heartbeat_port = 7101
+
+[[cluster.nodes]]
+id = 2
+host = "127.0.0.1"
+port = 7002
+heartbeat_port = 7102
+
+[[cluster.nodes]]
+id = 3
+host = "127.0.0.1"
+port = 7003
+heartbeat_port = 7103

@@ -4,6 +4,7 @@
 
 # Experiment output (keep summaries, not raw runs)
 /results/raw/
+/logs/
 
 # Editors and OS
 .DS_Store
