@@ -100,7 +100,9 @@ pub enum NodeMsg {
         epoch: Epoch,
         /// False when the follower's log did not match at `prev_seq`.
         ok: bool,
-        /// Highest seq the follower now holds that matches the coordinator.
+        /// When `ok`: the highest seq the follower now holds that matches the
+        /// coordinator. When not `ok`: a hint, always below the `prev_seq` that
+        /// failed, from which the coordinator should retry.
         match_seq: Seq,
     },
 
@@ -127,14 +129,11 @@ pub enum NodeMsg {
         epoch: Epoch,
     },
 
-    // Rejoin (Section 9)
+    // Rejoin (Section 9). Sent to the coordinator by a node that is outside
+    // the view; the missing entries arrive through the normal `Append` stream.
     Join {
         last_epoch: Epoch,
         last_seq: Seq,
-    },
-    JoinData {
-        entries: Vec<Entry>,
-        commit: Seq,
     },
 
     // Operator (Section 8); forwarded to the coordinator by whichever node receives it
@@ -179,6 +178,8 @@ pub enum ProposeOutcome {
     NotCoordinator {
         hint: Option<NodeId>,
     },
+    /// The executor is not in the coordinator's current view (invariant I5).
+    NotInView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -279,3 +279,64 @@ Entries DL-014 to DL-029 settle the decisions left open by `protocol-v2.md` Sect
 | Client sequence numbers, RTT estimates | Client middleware (Sara) | the client process |
 
 - Reason: the project description asks for state ownership to be defined explicitly (p. 6), and a single owner per piece of state is what makes the single-core-task model of DL-017 work.
+
+---
+
+Entries DL-030 to DL-037 record decisions made while implementing workstream A (`crates/replication`), 2026-10-20.
+
+## DL-030. Rejoin catches up through the coordinator, not a donor
+
+- Date: 2026-10-20. Status: agreed. Supersedes the donor part of DL-012.
+- Decision: the coordinator replicates its log to all three nodes, members of the view or not, so a returning node receives what it missed through the normal `Append` stream and log repair. `Join` only asks to be re-admitted to the view; the `JoinData` message is removed.
+- Alternative: a donor chosen among the active nodes sends the missing suffix (DL-012).
+- Reason: one replication path instead of two, and it is the path every other test already exercises. The donor's only advantage was that catch-up could proceed during an election. Without a coordinator nothing can commit, so re-admission has to wait for one anyway.
+
+## DL-031. A coordinator that loses its lease becomes a follower, not SYNCING
+
+- Date: 2026-10-20. Status: agreed. Changes protocol Section 7, step 8.
+- Decision: on a higher epoch or an expired lease, the coordinator steps down to follower. A node's status changes only when it applies a view that excludes it, or when it wakes from an injected silence.
+- Reason: with SYNCING as a separate trigger, a coordinator that was briefly cut off but never removed from the view would need a re-admission it cannot get, because it is already a member.
+
+## DL-032. When a node is ACTIVE
+
+- Date: 2026-10-20. Status: agreed.
+- Decision: a node is ACTIVE when it is in the latest view it has applied, and it has applied the commit position it learned from the coordinator after its last silence. At start-up that position is 0.
+- Reason: this covers both rejoin cases with one rule. After a short silence the node never left the view and only needs to catch up. After a long one it was removed and the re-admission entry proves it caught up.
+
+## DL-033. A SYNCING node may stand for coordinator after an extra delay
+
+- Date: 2026-10-20. Status: agreed. Refines protocol Section 7.
+- Decision: SYNCING nodes wait an extra `2 × fd_max_ms` before standing, instead of never standing.
+- Reason: if they never stood, a cluster in which the only reachable nodes are SYNCING would never elect a coordinator. Safety does not depend on this rule, because the pre-vote and vote checks already refuse a candidate whose log is behind.
+
+## DL-034. Coordinator keep-alives and prompt commit notices
+
+- Date: 2026-10-20. Status: agreed.
+- Decision:
+  - The coordinator sends each peer an `Append` every `heartbeat_ms`, empty if there is nothing new. This doubles as retransmission of anything unacknowledged and renews the lease.
+  - When the commit position advances and no `Append` has gone to a peer within `heartbeat_ms / 10`, one is sent.
+  - The core does not read UDP heartbeats. It takes the failure detector's verdicts through `set_suspected`.
+- Reason: without the prompt notice, followers learned of commits up to 100 ms late, which delayed reads and view changes. The first scenario test exposed this.
+
+## DL-035. The coordinator enforces view membership at commit
+
+- Date: 2026-10-20. Status: agreed.
+- Decision: a proposal whose executor is not in the coordinator's latest view is refused with the new outcome `ProposeOutcome::NotInView`.
+- Reason: this enforces invariant I5 at the single point every result passes through, rather than trusting each executor's own view.
+
+## DL-036. The majority is always two of the three nodes
+
+- Date: 2026-10-20. Status: agreed.
+- Decision: commit and election count acknowledgments from any two of the three nodes, members of the view or not. The view decides only who may execute requests.
+- Reason: changing the voting set as the view changes would require Raft's joint-consensus reconfiguration, and nothing in the project needs it. A SYNCING node holds real log entries, so its acknowledgment is as good as anyone's.
+
+## DL-037. How workstream A is tested
+
+- Date: 2026-10-20. Status: agreed.
+- Decision: the core performs no I/O and reads no clock, so it is tested in three layers:
+  - Rule tests (`tests/rules.rs`): one node driven with hand-written messages, checking the election, commit and fencing rules one at a time.
+  - Scenario tests (`tests/scenarios.rs`): three nodes on a loss-free simulated network, one test per behaviour: failover, fencing, lease, rejoin, injection, duplicates, stale plans.
+  - Randomized simulation (`tests/simulation.rs`): loss up to 5%, duplication, delays up to 15 ms, competing executors, scheduled injections and random isolations, including runs that lose the majority. Every run checks invariants I1–I5, agreement of committed logs, one coordinator per epoch, and that executors never receive two different results. After a quiet period it checks that the cluster has converged.
+- Evidence on 2026-10-20:
+  - All tests pass, including 2,000 randomized runs (`SIM_SEEDS=1000`).
+  - Eleven deliberately broken versions of the core (no version check, no duplicate check, the Raft "Figure 8" commit rule, votes or pre-votes ignoring log freshness, no log matching, no view check, no lease, no catch-up wait) are each caught by at least one test.

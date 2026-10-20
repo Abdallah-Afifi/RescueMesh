@@ -139,7 +139,7 @@ Quorum election with Bully-ordered candidacy. The vote rule and the log repair a
 5. **Win.** With its own vote plus one, the candidate sends `COORDINATOR(epoch)`. It then appends a `VIEW` entry in the new epoch. Entries inherited from earlier epochs count as committed only once that entry is committed.
 6. **Lose or collide.** If no majority arrives, it waits a random backoff and retries with a new epoch.
 7. **Log repair.** Every `APPEND` carries the `(seq, epoch)` of the preceding entry. A follower whose log does not match at that point deletes its unmatched suffix and accepts the coordinator's. Only uncommitted entries can be deleted this way, and no client was ever told they succeeded.
-8. **Stepping down.** A coordinator that sees a higher epoch, or gets no acknowledgment from any peer for the lease period `L`, stops acting and enters SYNCING.
+8. **Stepping down.** A coordinator that sees a higher epoch, or gets no acknowledgment from any peer for the lease period `L`, stops acting and becomes a follower. Its status changes only through the view or after an injected silence (design log DL-031).
 
 A recovered higher-ID node does not take the role back. Safety rests on the majority rule and the epoch, not on clocks: every coordinator action is a log entry that needs a peer's acknowledgment. The lease only makes a cut-off coordinator stop trying sooner. Time to a new coordinator therefore stays at `T_d` plus two round trips, with no lease wait.
 
@@ -155,14 +155,14 @@ The project description says the servers "elect one machine to ignore communicat
 
 ## 9. Rejoin and recovery
 
-1. The SYNCING node learns the coordinator and `commitIndex` from the first heartbeat it receives.
-2. It sends `JOIN(lastEntryEpoch, lastSeq)` to any ACTIVE node, which becomes its donor. The donor is not chosen by the coordinator, so rejoin does not wait on an election.
-3. The donor sends the missing log suffix, or a snapshot plus the suffix after it if the log has been trimmed that far.
-4. Meanwhile the coordinator already includes the node in its `APPEND` stream; the node buffers these.
-5. When the coordinator sees the node acknowledge up to its current `commitIndex`, it commits `VIEW(viewNo+1, activeSet with the node)`.
-6. The node becomes ACTIVE when it applies that `VIEW` entry.
+As implemented (design log DL-030, DL-032):
 
-The node is "sufficiently current" exactly when it applies the entry that re-admits it, because it must have applied everything before it. Recovery time is measured from the end of the silence to that moment.
+1. After an injected silence the node always enters SYNCING. It learns the coordinator and the commit position from the first `APPEND` it receives.
+2. The coordinator replicates to all three nodes whether or not they are in the view, so the missing entries arrive through the normal `APPEND` stream; log repair fills any gap. No separate donor is involved.
+3. If the node is still in the view (a short silence), it becomes ACTIVE once it has applied the commit position it learned in step 1.
+4. If it was removed from the view, it sends `JOIN` to the coordinator. Once the coordinator sees that the node holds everything committed, it commits a `VIEW` with the node added, and the node becomes ACTIVE when it applies that entry.
+
+In both cases the node is sufficiently current because it has applied every entry committed before it returned. Recovery time is measured from the end of the silence to the `active` event.
 
 ## 10. Evaluation plan corrections
 

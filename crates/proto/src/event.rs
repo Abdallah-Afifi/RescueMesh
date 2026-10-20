@@ -96,6 +96,8 @@ pub enum EventKind {
     ClockOffset,
     /// `cpu_model`, `cores`, `mem_bytes`, `os`; logged once at start
     MachineInfo,
+    /// `reason`, `target`; a fault injection the coordinator declined
+    InjectRefused,
 }
 
 impl Event {
