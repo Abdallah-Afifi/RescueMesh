@@ -9,7 +9,7 @@ The project is graded on distributed-systems design, measurement and documentati
 | Phase | Due | State |
 |---|---|---|
 | 0. Election algorithms survey | 4 Oct 2026 | Submitted. Revised after review (version 2). |
-| 1. Cloud processing, load balancing, fault tolerance | 4 Nov 2026, 8 PM | Design agreed in outline; no code yet. |
+| 1. Cloud processing, load balancing, fault tolerance | 4 Nov 2026, 8 PM | Planned: see `docs/phase1-plan.md`. No code yet. |
 | 2. Discovery, P2P, offline reconciliation | 5 Dec 2026, 8 PM | Not started. |
 
 ## Where things are
@@ -18,6 +18,7 @@ The project is graded on distributed-systems design, measurement and documentati
 |---|---|
 | `docs/spec/RescueMesh_Term_Project_v2.pdf` | The project description from the instructor. |
 | `docs/protocol-v2.md` | The cloud protocol we implement in Phase 1. Start here. |
+| `docs/phase1-plan.md` | Phase 1 requirements, who owns what, interfaces, schedule. |
 | `docs/design-log.md` | Every design decision, the alternatives, and the reason. Add an entry whenever a decision is made or changed. |
 | `docs/phase0/104_survey_v1_submitted.pdf` | The survey exactly as submitted. Do not edit. |
 | `docs/phase0/104_survey_v2.docx` | The corrected survey, for reuse in the Phase 1 and final reports. |

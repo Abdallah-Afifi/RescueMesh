@@ -1,6 +1,6 @@
 # RescueMesh cloud protocol, v2
 
-Status: proposed 2026-10-13. Replaces Section 7 of the submitted Phase 0 survey (`phase0/104_survey_v1_submitted.pdf`); version 2 of the survey (`phase0/104_survey_v2.docx`) describes this design as the design we implement in Phase 1. Each change from the survey has an entry in `design-log.md`.
+Status: proposed 2026-10-13. This is the design we implement in Phase 1. It replaces Section 7 of the submitted Phase 0 survey (`phase0/104_survey_v1_submitted.pdf`), and version 2 of the survey (`phase0/104_survey_v2.docx`) describes the same design. Each change from the submitted survey has an entry in `design-log.md`.
 
 All numeric values are starting points to be tuned by measurement, not results.
 
