@@ -40,6 +40,7 @@ cargo run -p node -- --config config/local.toml --id 1  # one cloud node
 |---|---|---|
 | `crates/proto` | shared | Types, messages, traits, config, event schema. Changes need a design-log entry. |
 | `crates/replication` | A | Replicated log, coordinator election, view, rejoin, fault injection. Fully tested (see design log DL-037). |
+| `crates/selection` | C | Executor selection: MWBE score, baseline policies, request table, claims, load knob (see design log DL-038). |
 | `crates/node` | A–D | Cloud node binary `rm-node` |
 | `crates/client` | E | Client middleware library |
 | `crates/loadgen` | E | Workload generator and frontend `rm-loadgen` |

@@ -340,3 +340,21 @@ Entries DL-030 to DL-037 record decisions made while implementing workstream A (
 - Evidence on 2026-10-20:
   - All tests pass, including 2,000 randomized runs (`SIM_SEEDS=1000`).
   - Eleven deliberately broken versions of the core (no version check, no duplicate check, the Raft "Figure 8" commit rule, votes or pre-votes ignoring log freshness, no log matching, no view check, no lease, no catch-up wait) are each caught by at least one test.
+
+## DL-038. Executor selection: details settled while implementing workstream C
+
+- Date: 2026-10-21. Status: proposed (C), for review by B.
+- Context: `crates/selection` implements protocol Section 5 and the baselines of Section 10. The protocol leaves the following points open; each is decided here.
+- Decisions:
+  - **Unknown client RTT.** Until the client has measured its round trip to a node, the RTT term for that node is the cap (1000 thousandths). A node the client has never heard back from ranks as the furthest away. When no RTT is known for any node, the term is equal for all and has no effect.
+  - **Quantization rounds down.** Scores 0.200 to 0.249 are all step 4 with the default quantum of 0.05.
+  - **Fresh bids reuse the MWBE ranker.** `MwbeBids` ranks with the same key as `MwbeCached`; only the source of the scores differs. Collecting a bid per request is a runtime concern and stays optional (Section 10).
+  - **Baselines.** `random` is a per-request permutation by `hash(reqID, nodeID)`; `hash` puts node `hash(reqID) mod n` first and the rest in ring order; `round-robin` cycles through the nodes per client incarnation from a hashed offset, so different clients do not start on the same node; `two-choices` takes the lower MWBE key of two nodes drawn from the request hash; `highest-id` always puts the highest ID first (plain Bully, no balancing).
+  - **Competing claims use the MWBE key under every policy.** A claim always carries the MWBE key, so two competing claims are resolved the same way whatever the policy. Under MWBE the first-ranked node always holds the lowest key.
+  - **A claim may arrive before the request.** The client sends to all three nodes, so a peer's claim can overtake the request. The row is created as CLAIMED and the request is stored when it arrives, in case the claimer later leaves the view.
+  - **Own claims survive SYNCING.** A node that is SYNCING but still in the view keeps its claims, because the other nodes still see it as the claimer and the coordinator accepts proposals from view members. It aborts its claims only when it applies a view that excludes it.
+  - **Acknowledged requests are ignored.** A request with `seq ≤ ackedUpTo` is a stray retry of something the client already has; rows at or below `ackedUpTo` are dropped.
+  - **Queries bypass selection.** Read-only requests are answered from applied state by the runtime (DL-019) and never enter the request table.
+  - **Rank-1 hint.** The node passed to `Core::set_rank1_hint` is the view member with the lowest quantized load score, ignoring client RTT, ties to the lower ID.
+  - **Load knob.** A CPU burner (`selection::knob::CpuBurner`) burns a chosen share of a chosen number of cores in 10 ms busy/idle cycles. It affects the score only through measured CPU and slower planning, as real load would.
+- Evidence: unit tests for the score (including the worked example), every policy (each returns a permutation of the view, is deterministic, and an idle cluster spreads requests), the request table, claim timeouts, competing claims, takeover on view change, retries, acknowledgment clean-up and the local correction; plus a three-node simulation that delays claims up to twice the claim timeout over 20 seeds and four policies, and checks that all nodes agree on exactly one executor per request.

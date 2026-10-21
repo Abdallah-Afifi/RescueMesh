@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/proto", "crates/node", "crates/client", "crates/loadgen", "crates/ctl", "crates/replication"]
+members = ["crates/proto", "crates/node", "crates/client", "crates/loadgen", "crates/ctl", "crates/replication", "crates/selection"]
 
 [workspace.package]
 edition = "2024"
@@ -11,6 +11,7 @@ publish = false
 proto = { path = "crates/proto" }
 client = { path = "crates/client" }
 replication = { path = "crates/replication" }
+selection = { path = "crates/selection" }
 serde = { version = "1.0.229", features = ["derive"] }
 postcard = { version = "1.1.3", features = ["use-std"] }
 serde_json = "1.0.154"
