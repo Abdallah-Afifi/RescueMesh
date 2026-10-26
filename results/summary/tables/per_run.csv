@@ -1,0 +1,2 @@
+run,label,series,x,seed,n_ok,n_gave_up,n_busy_replies,window_s,throughput,mean_ms,max_ms,retried_frac,gave_up_frac,p50_ms,p95_ms,p99_ms
+local,local,local,,0,20937,2888,44463,40.0088085,523.309760649333,683.7289493719253,3333.173,0.59908296317524,0.12121720881427073,985.799,1571.3436,1911.7191599999987

@@ -1,0 +1,2 @@
+series,label,x,seeds,throughput,throughput_ci95,mean_ms,mean_ms_ci95,p50_ms,p50_ms_ci95,p95_ms,p95_ms_ci95,p99_ms,p99_ms_ci95,retried_frac,retried_frac_ci95,gave_up_frac,gave_up_frac_ci95
+local,local,,1,523.309760649333,,683.7289493719253,,985.799,,1571.3436,,1911.7191599999987,,0.59908296317524,,0.12121720881427073,

@@ -1,0 +1,24 @@
+# Copy to machines.toml and fill in. Every machine needs password-less ssh,
+# the repository built with `cargo build --release`, and chrony running.
+repo_dir = "~/RescueMesh"          # path of the checkout on every machine
+ssh_opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+
+[[cloud]]
+id = 1
+ssh = "user@10.0.0.11"             # same hosts as config/cluster.example.toml
+[[cloud]]
+id = 2
+ssh = "user@10.0.0.12"
+[[cloud]]
+id = 3
+ssh = "user@10.0.0.13"
+
+[[client]]
+machine = 1
+ssh = "user@10.0.0.21"
+[[client]]
+machine = 2
+ssh = "user@10.0.0.22"
+[[client]]
+machine = 3
+ssh = "user@10.0.0.23"
