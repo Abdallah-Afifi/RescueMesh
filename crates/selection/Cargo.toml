@@ -1,0 +1,13 @@
+[package]
+name = "selection"
+version = "0.1.0"
+description = "Executor selection: MWBE scoring, baseline policies, request table and claims (workstream C)"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+proto.workspace = true
+
+[lints]
+workspace = true

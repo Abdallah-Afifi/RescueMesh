@@ -340,3 +340,46 @@ Entries DL-030 to DL-037 record decisions made while implementing workstream A (
 - Evidence on 2026-10-20:
   - All tests pass, including 2,000 randomized runs (`SIM_SEEDS=1000`).
   - Eleven deliberately broken versions of the core (no version check, no duplicate check, the Raft "Figure 8" commit rule, votes or pre-votes ignoring log freshness, no log matching, no view check, no lease, no catch-up wait) are each caught by at least one test.
+
+## DL-038. Executor selection: details settled while implementing workstream C
+
+- Date: 2026-10-21. Status: proposed (C), for review by B.
+- Context: `crates/selection` implements protocol Section 5 and the baselines of Section 10. The protocol leaves the following points open; each is decided here.
+- Decisions:
+  - **Unknown client RTT.** Until the client has measured its round trip to a node, the RTT term for that node is the cap (1000 thousandths). A node the client has never heard back from ranks as the furthest away. When no RTT is known for any node, the term is equal for all and has no effect.
+  - **Quantization rounds down.** Scores 0.200 to 0.249 are all step 4 with the default quantum of 0.05.
+  - **Fresh bids reuse the MWBE ranker.** `MwbeBids` ranks with the same key as `MwbeCached`; only the source of the scores differs. Collecting a bid per request is a runtime concern and stays optional (Section 10).
+  - **Baselines.** `random` is a per-request permutation by `hash(reqID, nodeID)`; `hash` puts node `hash(reqID) mod n` first and the rest in ring order; `round-robin` cycles through the nodes per client incarnation from a hashed offset, so different clients do not start on the same node; `two-choices` takes the lower MWBE key of two nodes drawn from the request hash; `highest-id` always puts the highest ID first (plain Bully, no balancing).
+  - **Competing claims use the MWBE key under every policy.** A claim always carries the MWBE key, so two competing claims are resolved the same way whatever the policy. Under MWBE the first-ranked node always holds the lowest key.
+  - **A claim may arrive before the request.** The client sends to all three nodes, so a peer's claim can overtake the request. The row is created as CLAIMED and the request is stored when it arrives, in case the claimer later leaves the view.
+  - **Own claims survive SYNCING.** A node that is SYNCING but still in the view keeps its claims, because the other nodes still see it as the claimer and the coordinator accepts proposals from view members. It aborts its claims only when it applies a view that excludes it.
+  - **Acknowledged requests are ignored.** A request with `seq ≤ ackedUpTo` is a stray retry of something the client already has; rows at or below `ackedUpTo` are dropped.
+  - **Queries bypass selection.** Read-only requests are answered from applied state by the runtime (DL-019) and never enter the request table.
+  - **Rank-1 hint.** The node passed to `Core::set_rank1_hint` is the view member with the lowest quantized load score, ignoring client RTT, ties to the lower ID.
+  - **Load knob.** A CPU burner (`selection::knob::CpuBurner`) burns a chosen share of a chosen number of cores in 10 ms busy/idle cycles. It affects the score only through measured CPU and slower planning, as real load would.
+- Evidence: unit tests for the score (including the worked example), every policy (each returns a permutation of the view, is deterministic, and an idle cluster spreads requests), the request table, claim timeouts, competing claims, takeover on view change, retries, acknowledgment clean-up and the local correction; plus a three-node simulation that delays claims up to twice the claim timeout over 20 seeds and four policies, and checks that all nodes agree on exactly one executor per request.
+
+---
+
+Entries DL-046 and DL-047 come from the review of the `selection` branch before it was merged, 2026-10-29.
+
+## DL-046. Claims are kept per claimer, and valid while the claimer stays in the view
+
+- Date: 2026-10-29. Status: agreed (integration review of workstream C). Refines DL-038 and protocol invariant I5.
+- Problems found:
+  - Each node kept only the lowest claim it had seen. A survivor that held a removed node's claim discarded a successor's higher claim, then took over after the view change and claimed too. In a reviewer's simulation, half of staggered view changes ended with two nodes executing the same request and disagreeing on who held it.
+  - A claim carrying an older view number was ignored even when its sender never left the view. Every view change therefore produced competing executions for requests claimed just before it.
+- Decision:
+  - Each request row keeps every valid claim it has received, by claimer. The executor is the lowest key among them.
+  - When a view change removes the executor, the lowest remaining claim takes over; that node resumes executing if it had aborted. Only when no claim remains is the request ranked again.
+  - A claim is valid if its sender has been in the view continuously since the view number the claim carries. A claim from a view this node has not applied yet is kept and checked when that view is applied.
+- Safety: the coordinator still refuses results from executors outside its current view (DL-035), and its duplicate check (I1) makes any remaining double execution harmless.
+- Evidence: regression tests for staggered takeover and for resumed execution fail on the previous code and pass now. There are also tests for claims from continuing members, re-admitted members and not-yet-applied views.
+
+## DL-047. The missed-heartbeat term is off by default
+
+- Date: 2026-10-29. Status: agreed (integration review). Changes the DL-024 default weights.
+- Problem: the score's reliability term `f` is each node's own count of a peer's missed heartbeats (protocol Section 5.1). Different nodes therefore rank from different inputs, which breaks the determinism rule of DL-023. A reviewer measured disagreement on 38 of 1,000 requests from a 5% miss rate seen by one node. Every disagreement costs a competing claim or a claim-timeout stall.
+- Decision: the default weights are now 250 for queue, CPU, service time and client RTT, and 0 for missed heartbeats. The term stays in the code and the config for experiments.
+- Reason: an unreliable node is already handled by the failure detector and removed from the view. A per-node opinion adds no protection and costs agreement.
+- Alternative for later: carry the client's per-node failure ratio in the request, next to its RTTs. Every node would then see the same value, and it would match the spec's "communication reliability with the originating client". This needs a field in `ClientReq`.
