@@ -419,6 +419,15 @@ impl Client {
     /// Sends `op` and waits for its result, retrying as described in the
     /// module documentation. Sequence numbers start at 1.
     pub async fn submit(&self, op: Op) -> Result<Completed, SubmitError> {
+        self.submit_at(op, Instant::now()).await
+    }
+
+    /// Like [`Client::submit`], but the reported latency is measured from
+    /// `scheduled`, the time the workload meant to issue the request. In an
+    /// open-loop run a busy client may start a request late; that wait is part
+    /// of what a user experiences, so it is counted rather than hidden
+    /// (coordinated omission). A `scheduled` time in the future counts as now.
+    pub async fn submit_at(&self, op: Op, scheduled: Instant) -> Result<Completed, SubmitError> {
         let inner = &*self.mw.0;
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let id = ReqId {
@@ -434,7 +443,7 @@ impl Client {
                 sent_at_ms: now_ms(),
                 op,
             },
-            started: Instant::now(),
+            started: scheduled.min(Instant::now()),
         };
         inner.submitted.fetch_add(1, Ordering::Relaxed);
         inner.inflight.fetch_add(1, Ordering::Relaxed);

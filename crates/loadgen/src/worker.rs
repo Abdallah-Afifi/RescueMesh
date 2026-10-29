@@ -96,10 +96,23 @@ impl User {
 }
 
 /// Sends one operation and records the outcome.
-async fn issue(run: &Run, mw: &Middleware, user: &User, op: Op, kind: Kind) {
+/// Issues one request. `scheduled` is its planned arrival in open-loop mode,
+/// so latency includes any delay before the client got to it.
+async fn issue(
+    run: &Run,
+    mw: &Middleware,
+    user: &User,
+    op: Op,
+    kind: Kind,
+    scheduled: Option<Instant>,
+) {
     let measuring = mw.phase() == Phase::Measure;
     run.bump(measuring, Field::Started, 1);
-    match user.client.submit(op).await {
+    let result = match scheduled {
+        Some(at) => user.client.submit_at(op, at).await,
+        None => user.client.submit(op).await,
+    };
+    match result {
         Ok(done) => {
             run.bump(measuring, Field::Ok, 1);
             run.bump(measuring, Field::Retries, u64::from(done.attempts - 1));
@@ -135,7 +148,7 @@ async fn closed_user(run: Arc<Run>, mw: Middleware, user: Arc<User>, think_ms: u
     while !run.end_gen.load(Ordering::Relaxed) {
         let (op, kind) = user.next();
         run.inflight.fetch_add(1, Ordering::Relaxed);
-        issue(&run, &mw, &user, op, kind).await;
+        issue(&run, &mw, &user, op, kind, None).await;
         run.inflight.fetch_sub(1, Ordering::Relaxed);
         if think_ms > 0 {
             time::sleep(Duration::from_secs_f64(rng.exp(think_ms as f64 / 1000.0))).await;
@@ -168,8 +181,9 @@ async fn open_loop(
                 let (op, kind) = user.next();
                 run.inflight.fetch_add(1, Ordering::Relaxed);
                 let (run, mw) = (run.clone(), mw.clone());
+                let scheduled = next;
                 tokio::spawn(async move {
-                    issue(&run, &mw, &user, op, kind).await;
+                    issue(&run, &mw, &user, op, kind, Some(scheduled)).await;
                     run.inflight.fetch_sub(1, Ordering::Relaxed);
                 });
             }
@@ -206,6 +220,19 @@ async fn sample_loop(log: Arc<EventLog>, mw: Middleware, run: Arc<Run>) {
                 .field("dropped_client", c.dropped_client)
                 .field("phase", mw.phase().as_str()),
         );
+    }
+}
+
+/// Wall-clock end of the warm-up and of the measure phase.
+fn phase_bounds(start_at_ms: u64, warmup_secs: u64, duration_secs: u64) -> (u64, u64) {
+    let warm_end = start_at_ms + warmup_secs * 1000;
+    (warm_end, warm_end + duration_secs * 1000)
+}
+
+async fn sleep_until_ms(at_ms: u64) {
+    let now = now_ms();
+    if at_ms > now {
+        time::sleep(Duration::from_millis(at_ms - now)).await;
     }
 }
 
@@ -268,20 +295,21 @@ pub async fn run(args: WorkerArgs) -> io::Result<WorkerSummary> {
         });
     }
 
-    // Wait for the common start time.
-    let now = now_ms();
-    if start_at_ms > now {
-        time::sleep(Duration::from_millis(start_at_ms - now)).await;
-    }
+    // Phase boundaries are wall-clock times derived from the shared
+    // `start_at_ms`, so a worker that starts late (a slow connect, a busy
+    // machine) still measures exactly the same window as every other worker.
+    let (warm_end, measure_end) =
+        phase_bounds(start_at_ms, params.warmup_secs, params.duration_secs);
+    sleep_until_ms(start_at_ms).await;
     mw.set_phase(Phase::Warmup);
     let phases = {
         let (run, mw) = (run.clone(), mw.clone());
-        let (warmup, duration) = (params.warmup_secs, params.duration_secs);
+        let duration = params.duration_secs;
         tokio::spawn(async move {
-            time::sleep(Duration::from_secs(warmup)).await;
+            sleep_until_ms(warm_end).await;
             mw.set_phase(Phase::Measure);
             if duration > 0 {
-                time::sleep(Duration::from_secs(duration)).await;
+                sleep_until_ms(measure_end).await;
                 mw.set_phase(Phase::Cooldown);
                 run.end_gen.store(true, Ordering::Relaxed);
             }
@@ -387,4 +415,16 @@ pub async fn run(args: WorkerArgs) -> io::Result<WorkerSummary> {
         .with_file_name(format!("{machine_name}-{process}.summary.json"));
     std::fs::write(&path, serde_json::to_vec_pretty(&summary)?)?;
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase_bounds_depend_only_on_the_shared_start() {
+        // Every worker computes the same boundaries, however late it started.
+        assert_eq!(phase_bounds(1_000_000, 10, 60), (1_010_000, 1_070_000));
+        assert_eq!(phase_bounds(1_000_000, 0, 0), (1_000_000, 1_000_000));
+    }
 }

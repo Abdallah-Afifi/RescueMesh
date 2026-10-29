@@ -102,6 +102,54 @@ def test_no_spike_is_reported_as_no_excursion():
         assert f["failover_s"] == 0.0, f
 
 
+def test_network_rate_from_cumulative_counters():
+    import pandas as pd
+    t = pd.Series([0.0, 1.0, 2.0, 3.0, 4.0])
+    total = pd.Series([0, 2e6, 4e6, 1e6, 3e6])  # restarted between 2 s and 3 s
+    r = analyze.counter_rate_mb_s(t, total).to_numpy()
+    assert np.isnan(r[0])
+    assert r[1] == r[2] == 2.0
+    assert np.isnan(r[3]), "a counter reset is a gap, not a negative rate"
+    assert r[4] == 2.0
+
+
+def test_missing_samples_show_as_a_gap():
+    t = np.array([0.0, 1.0, 2.0, 8.0, 9.0])
+    y = np.array([1.0, 1.0, 1.0, 2.0, 2.0])
+    tt, yy = analyze.break_gaps(t, y)
+    assert len(tt) == 6 and np.isnan(yy[3]), (tt, yy)
+    tt, yy = analyze.break_gaps(np.array([0.0, 1.0, 2.0]), np.array([1.0, 2.0, 3.0]))
+    assert not np.isnan(yy).any()
+
+
+def test_resource_figure_includes_memory_and_network():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = synthetic_run(Path(tmp))
+        rows = []
+        for i in range(20):
+            rows.append(ev(10 + i, "resource_sample", machine="client1", scope="machine", cpu_permille=300,
+                           mem_used_bytes=2_000_000_000, net_rx_bytes=i * 1_000_000, net_tx_bytes=i * 500_000))
+            rows.append(ev(10 + i, "resource_sample", machine="cloud1", node=1, cpu_permille=500,
+                           rss_bytes=50_000_000, net_rx_bytes=i * 3_000_000, net_tx_bytes=i * 3_000_000, queue_len=4))
+        with open(d / "client1-0.jsonl", "a") as f:
+            f.write("\n".join(json.dumps(r) for r in rows) + "\n")
+        run = analyze.load_runs(Path(tmp))[0]
+        captured = {}
+        real = analyze.plt.subplots
+
+        def spy(n, *a, **k):
+            captured["panels"] = n
+            return real(n, *a, **k)
+
+        analyze.plt.subplots = spy
+        try:
+            analyze.plot_resources(run, Path(tmp))
+        finally:
+            analyze.plt.subplots = real
+        assert captured["panels"] == 7, captured
+        assert (Path(tmp) / f"resources_{run.id}.png").exists()
+
+
 def test_clock_offsets_are_corrected():
     with tempfile.TemporaryDirectory() as tmp:
         synthetic_run(Path(tmp), client_offset_s=2.0)  # client clock 2 s fast

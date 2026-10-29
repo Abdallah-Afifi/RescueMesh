@@ -139,6 +139,7 @@ This is the critical path. Everything that touches shared state goes through it.
 
 **Also owns:**
 - Integration: the Cargo workspace, the end-to-end build, and the shared interfaces in Section 3 below.
+- The node's core-task loop, which drives the replication core and the selector and carries out their actions. It enforces two of the selector's runtime rules (`crates/selection` docs): never drop an `Execute`, and reply BUSY to the client before a request reaches selection when the planning pool is full.
 - Deployment scripts, the machine config, and runs on the six physical machines (Section 1.4).
 - Report assembly and final editing.
 
@@ -215,7 +216,7 @@ This is the critical path. Everything that touches shared state goes through it.
 - A tunable cost knob, so a request can take a chosen amount of CPU.
 - Snapshot reads that record the version of every resource read, and plans emitted as the writes the coordinator checks.
 - Applying committed `RESULT` entries to the state.
-- The node's planning worker pool: bounded queue, backpressure (a BUSY reply when full) and queue-length reporting to C.
+- The node's planning worker pool: bounded queue, backpressure (a BUSY reply when full) and queue-length reporting to C. The pool must always accept an `Execute` from selection, report when it is full so the core task can reply BUSY first, and commit `OpResult::Refused` once a request has been re-planned `timeouts.max_replans` times (`crates/selection` docs).
 
 **Demo scenario:** supports all of them (it generates the load).
 

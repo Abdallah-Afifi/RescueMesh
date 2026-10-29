@@ -444,3 +444,22 @@ Entries DL-048 and DL-049 come from the review of the `client-loadgen` branch be
 - Problem: the analysis took the failover time as the first point after the silence where 2 s of windows were back in band, searching from the silence itself. When the latency spike started 2 s or more after the silence, which is typical (client timeout, failure detection, view change), the windows before the spike counted as recovery. The result was 0 s and "no excursion" for exactly the worst failovers; the first stand-in summary already contained one such row.
 - Decision: recovery is searched for only after the first out-of-band window. `no_excursion` means no window after the silence was out of band. The hold is set in seconds (`hold_s`, 2 s), not in windows, so changing `--window-ms` keeps the 2 s rule. `retries_during` counts requests that needed a retry, not retry events.
 - Evidence: a new test with a spike starting 2.5 s late fails on the previous code and passes now. A no-spike test checks the other branch.
+
+---
+
+Entries DL-050 and DL-051 close the minor items left from the 2026-10-29 integration review.
+
+## DL-050. Under a baseline policy, competing claims follow the policy's ranking
+
+- Date: 2026-10-29. Status: agreed. Supersedes the "competing claims use the MWBE key under every policy" point of DL-038.
+- Problem: claims always carried the MWBE load key. Under a baseline (random, hash, round-robin, two-choices, highest-ID), suppose the node the policy ranked first was busy and the next node timed out and claimed too. The less loaded claimer then won. The baselines quietly leaned towards load balancing, which flatters them in the comparison with MWBE.
+- Decision: under MWBE the claim key is still the quantized load score. Under every other policy it is the claimer's position in the policy's ranking (0 for first), with the same hash tie-break. The policy's own first choice therefore wins every competing claim.
+- Evidence: a test with the random policy and a heavily loaded first choice fails under the old keys and passes now.
+
+## DL-051. Load-generator timing: shared phase boundaries, latency from the scheduled arrival
+
+- Date: 2026-10-29. Status: agreed. Refines DL-043 and DL-044.
+- Decisions:
+  - **Phase boundaries** (end of warm-up, end of measurement) are wall-clock times computed from the shared `start_at_ms`, not timers started when each worker begins. A worker that started late, for example after a slow connect, still measures the same window as every other worker.
+  - **Open-loop latency** is measured from the request's scheduled arrival time, not from when the client got round to sending it. A busy client therefore cannot hide its own queueing delay, which would otherwise under-report the tail (coordinated omission). Closed-loop latency is unchanged.
+  - **Resource figures** now show memory (client machines: used memory; cloud nodes: RSS) and network throughput in and out, computed as MB/s from the cumulative byte counters. A counter reset and a run of missing samples both show as gaps rather than as false spikes or straight lines.

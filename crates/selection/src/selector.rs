@@ -41,6 +41,7 @@
 use crate::rankers::make_ranker;
 use crate::score::{self, idle};
 use proto::config::{RankerKind, ScoreCfg, Timeouts};
+use proto::hash;
 use proto::{
     ClaimKey, ClientId, ClientReq, LoadSample, NodeId, OpResult, PeerScore, Ranker, ReqId, Seq,
     View, ViewNo,
@@ -158,6 +159,8 @@ pub struct Selector {
     me: NodeId,
     cfg: ScoreCfg,
     ranker: Box<dyn Ranker>,
+    /// Claim keys are MWBE scores under MWBE, rank positions otherwise (DL-050).
+    mwbe_keys: bool,
     claim_timeout_min_ms: u64,
     claim_timeout_rtt_multiple: u64,
     claim_timeout_ms: u64,
@@ -183,6 +186,7 @@ impl Selector {
         Selector {
             me,
             ranker: make_ranker(policy, score.clone()),
+            mwbe_keys: matches!(policy, RankerKind::MwbeCached | RankerKind::MwbeBids),
             cfg: score,
             claim_timeout_min_ms: min,
             claim_timeout_rtt_multiple: u64::from(timeouts.claim_timeout_rtt_multiple),
@@ -399,10 +403,11 @@ impl Selector {
                 continue;
             };
             *waiting += 1;
-            match order.get(*waiting) {
+            let position = *waiting;
+            match order.get(position) {
                 Some(&n) if n == self.me => {
                     self.stats.timeout_claims += 1;
-                    out.extend(self.claim(id));
+                    out.extend(self.claim(id, position));
                 }
                 Some(_) => *deadline = now.saturating_add(self.claim_timeout_ms),
                 None => *deadline = u64::MAX,
@@ -483,7 +488,7 @@ impl Selector {
             policy: self.ranker.name(),
         }];
         if order.first() == Some(&self.me) {
-            out.extend(self.claim(id));
+            out.extend(self.claim(id, 0));
         } else if let Some(row) = self.rows.get_mut(&id) {
             row.state = State::Seen {
                 order,
@@ -494,11 +499,22 @@ impl Selector {
         out
     }
 
-    fn claim(&mut self, id: ReqId) -> Vec<Action> {
+    /// Claims row `id`; `position` is this node's place in its ranking.
+    fn claim(&mut self, id: ReqId, position: usize) -> Vec<Action> {
         let Some(req) = self.rows.get(&id).and_then(|r| r.req.clone()) else {
             return Vec::new();
         };
-        let key = score::claim_key(&self.cfg, &req, &self.peer(self.me));
+        let key = if self.mwbe_keys {
+            score::claim_key(&self.cfg, &req, &self.peer(self.me))
+        } else {
+            // Under a baseline, competing claims follow the policy's own
+            // ranking: the node it put first wins, not the least loaded one.
+            ClaimKey {
+                score_step: u16::try_from(position).unwrap_or(u16::MAX),
+                tie: hash::tie_break(&id, self.me),
+                node: self.me,
+            }
+        };
         let view = self.view.no;
         if let Some(row) = self.rows.get_mut(&id) {
             row.claims.insert(self.me, (view, key));
@@ -892,6 +908,35 @@ pub(crate) mod tests {
             assert_eq!(rankings[0], rankings[1], "request {seq}");
             assert_eq!(rankings[1], rankings[2], "request {seq}");
         }
+    }
+
+    #[test]
+    fn under_a_baseline_competing_claims_follow_the_policy_not_the_load() {
+        // Random puts some node first; make that node the busiest. When the
+        // second-ranked node times out and claims too, the policy's choice
+        // must still win, or the baseline would quietly favour light nodes.
+        let mut c: Vec<Selector> = (1..=3).map(|n| node(n, RankerKind::Random)).collect();
+        let r = req(1);
+        let order = ranking(&c[0].on_request(0, r.clone()));
+        let (first, second) = (order[0], order[1]);
+        for s in &mut c {
+            s.on_heartbeat(first, load(60, 950, 400));
+            s.on_heartbeat(second, load(0, 50, 1));
+        }
+        let first_claim = claim_of(&c[first.index()].on_request(0, r.clone())).unwrap();
+        c[second.index()].on_request(0, r.clone());
+        let tc = c[second.index()].claim_timeout_ms();
+        let second_claim = claim_of(&c[second.index()].tick(tc)).unwrap();
+        assert!(
+            first_claim.2 < second_claim.2,
+            "the policy's first choice holds the lower key"
+        );
+        let a = c[second.index()].on_claim(first, first_claim.0, first_claim.1, first_claim.2);
+        assert_eq!(a, vec![Action::Abort(r.req.id)]);
+        assert_eq!(
+            c[second.index()].row_state(&r.req.id),
+            Some(RowState::Claimed(first))
+        );
     }
 
     #[test]

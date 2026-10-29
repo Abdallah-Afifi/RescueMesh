@@ -184,6 +184,28 @@ async fn silent_executor_is_survived_by_retrying_with_the_same_request_id() {
 }
 
 #[tokio::test]
+async fn latency_counts_from_the_scheduled_arrival() {
+    let stub = StubCluster::start_local(StubOpts::default()).await.unwrap();
+    let mw = Middleware::with_net(&net(&stub), policy(2_000, 2), None, 5);
+    assert!(mw.wait_connected(Duration::from_secs(2)).await);
+    let user = mw.client(uid(1));
+    // The request was due 200 ms ago: the client was late issuing it.
+    let scheduled = tokio::time::Instant::now() - Duration::from_millis(200);
+    let late = user.submit_at(query(), scheduled).await.unwrap();
+    assert!(
+        late.latency >= Duration::from_millis(200),
+        "{:?}",
+        late.latency
+    );
+    let on_time = user.submit(query()).await.unwrap();
+    assert!(
+        on_time.latency < Duration::from_millis(200),
+        "{:?}",
+        on_time.latency
+    );
+}
+
+#[tokio::test]
 async fn gives_up_when_nobody_answers_and_logs_it() {
     let dir = temp_dir("giveup");
     let stub = StubCluster::start_local(StubOpts::default()).await.unwrap();

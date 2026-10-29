@@ -109,7 +109,8 @@ def load_run(path: Path) -> Run | None:
         ev,
         ["kind", "machine", "node", "req", "phase", "outcome", "attempt", "latency_us",
          "service_us", "epoch", "victim", "duration_ms", "k", "active", "view",
-         "offset_ns", "cpu_permille", "queue_len", "scope", "rss_bytes", "when"],
+         "offset_ns", "cpu_permille", "queue_len", "scope", "rss_bytes", "when",
+         "mem_used_bytes", "net_rx_bytes", "net_tx_bytes"],
     )
     # Clock correction: mean of the offsets logged by each machine.
     offs = ev[ev.kind == "clock_offset"].groupby("machine").offset_ns.mean()
@@ -390,22 +391,66 @@ def plot_timeline(run: Run, fig_dir: Path, w=0.25, pre=10.0, post=30.0):
     plt.close(fig)
 
 
+def counter_rate_mb_s(t: pd.Series, total: pd.Series) -> pd.Series:
+    """MB/s from a cumulative byte counter sampled at times t (seconds).
+
+    A counter that goes backwards (a restarted process) gives NaN for that
+    interval rather than a negative spike.
+    """
+    order = np.argsort(t.to_numpy())
+    tt = t.to_numpy(dtype=float)[order]
+    yy = total.to_numpy(dtype=float)[order]
+    dt, dy = np.diff(tt, prepend=np.nan), np.diff(yy, prepend=np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = np.where((dy >= 0) & (dt > 0), dy / dt / 1e6, np.nan)
+    out = np.empty_like(r)
+    out[order] = r
+    return pd.Series(out, index=t.index)
+
+
+def break_gaps(t: np.ndarray, y: np.ndarray, max_gap_s: float = 2.5):
+    """Insert NaN where samples are missing for more than max_gap_s, so a
+    silenced node shows as a gap instead of a straight line across it."""
+    order = np.argsort(t)
+    t, y = t[order], y[order]
+    gaps = np.where(np.diff(t) > max_gap_s)[0] + 1
+    return np.insert(t, gaps, t[gaps - 1] + 1e-9), np.insert(y, gaps, np.nan)
+
+
 def plot_resources(run: Run, fig_dir: Path):
-    rs = run.ev[run.ev.kind == "resource_sample"]
+    """CPU, memory, network and queue traces per client machine and cloud node."""
+    rs = run.ev[run.ev.kind == "resource_sample"].copy()
     if rs.empty:
         return
+    for c in ("net_rx_bytes", "net_tx_bytes"):
+        rs[c] = pd.to_numeric(rs[c], errors="coerce")
+    rs["net_bytes"] = rs.net_rx_bytes + rs.net_tx_bytes
+    machines = rs[rs.scope == "machine"]
+    nodes = rs[rs.node.notna()]
+    # (title, rows, column, group by, transform)
     panels = [
-        ("client machine CPU (‰)", rs[(rs.scope == "machine")], "cpu_permille", "machine"),
-        ("cloud node CPU (‰)", rs[rs.node.notna()], "cpu_permille", "node"),
-        ("cloud node queue length", rs[rs.node.notna()], "queue_len", "node"),
+        ("client machine CPU (‰)", machines, "cpu_permille", "machine", None),
+        ("client machine memory used (MB)", machines, "mem_used_bytes", "machine", "mb"),
+        ("client machine network in+out (MB/s)", machines, "net_bytes", "machine", "rate"),
+        ("cloud node CPU (‰)", nodes, "cpu_permille", "node", None),
+        ("cloud node memory, RSS (MB)", nodes, "rss_bytes", "node", "mb"),
+        ("cloud node network in+out (MB/s)", nodes, "net_bytes", "node", "rate"),
+        ("cloud node queue length", nodes, "queue_len", "node", None),
     ]
-    panels = [p for p in panels if len(p[1]) and p[1][p[2]].notna().any()]
+    panels = [p for p in panels if len(p[1]) and pd.to_numeric(p[1][p[2]], errors="coerce").notna().any()]
     if not panels:
         return
-    fig, axes = plt.subplots(len(panels), 1, figsize=(9, 2.6 * len(panels)), sharex=True, squeeze=False)
-    for ax, (title, df, col, key) in zip(axes[:, 0], panels):
+    fig, axes = plt.subplots(len(panels), 1, figsize=(9, 2.3 * len(panels)), sharex=True, squeeze=False)
+    for ax, (title, df, col, key, how) in zip(axes[:, 0], panels):
         for name, g in df.groupby(key):
-            ax.plot(g.t, g[col], label=str(name), lw=.9)
+            y = pd.to_numeric(g[col], errors="coerce")
+            if how == "mb":
+                y = y / 1e6
+            elif how == "rate":
+                y = counter_rate_mb_s(g.t, y)
+            tt, yy = break_gaps(g.t.to_numpy(dtype=float), y.to_numpy(dtype=float))
+            label = f"node {int(name)}" if key == "node" else str(name)
+            ax.plot(tt, yy, label=label, lw=.9)
         ax.set_ylabel(title, fontsize=8)
         ax.legend(fontsize=7, ncol=4)
         ax.grid(alpha=.3)
