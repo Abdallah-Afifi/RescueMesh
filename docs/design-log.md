@@ -463,3 +463,16 @@ Entries DL-050 and DL-051 close the minor items left from the 2026-10-29 integra
   - **Phase boundaries** (end of warm-up, end of measurement) are wall-clock times computed from the shared `start_at_ms`, not timers started when each worker begins. A worker that started late, for example after a slow connect, still measures the same window as every other worker.
   - **Open-loop latency** is measured from the request's scheduled arrival time, not from when the client got round to sending it. A busy client therefore cannot hide its own queueing delay, which would otherwise under-report the tail (coordinated omission). Closed-loop latency is unchanged.
   - **Resource figures** now show memory (client machines: used memory; cloud nodes: RSS) and network throughput in and out, computed as MB/s from the cumulative byte counters. A counter reset and a run of missing samples both show as gaps rather than as false spikes or straight lines.
+
+## DL-052. The node's core task enforces the selector's runtime rules
+
+- Date: 2026-10-29. Status: agreed. Owner: Abdallah (core-task wiring).
+- Decision: `crates/node` gets a core task, `NodeTask`. It owns the replication core, the selector and the state machine, and talks to the planning pool through a small `PlanPool` interface that workstream D implements. Like the modules it drives, it performs no I/O and reads no clock, so it is tested in a deterministic simulator.
+- Rules enforced:
+  - **Never drop an `Execute`.** `PlanPool::submit` cannot refuse a job. A request already being planned is not submitted twice. A job aborted after its proposal was sent is kept, so its outcome is still answered.
+  - **Reply `Busy` before selection.** A new write request, or a retry of one still unclaimed, that arrives while `PlanPool::is_full` is true is answered `Busy` and never reaches the selector. Retries of a request the selector holds as claimed or committed still go to the selector, which answers them without new planning work.
+- Also:
+  - Reads are answered from the state machine and never enter selection (DL-019).
+  - A `Stale` outcome sends the request back to the pool with its attempt number. The planner returns `Refused` once the attempt exceeds `max_replans` (workstream D's rule).
+  - Heartbeats older than the last one from the same process are dropped.
+- Evidence: seven end-to-end tests with three full nodes and fake pools. Four deliberately broken versions are each caught: no Busy check, the Busy check skipped for new requests, `Execute` dropped when full, and no re-planning. A chaos test with message loss, injected silences, isolations and pools of 2 to 32 slots passes 50 seeds; every client gets exactly the committed result.

@@ -294,6 +294,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "proto",
+ "replication",
+ "selection",
+ "serde_json",
 ]
 
 [[package]]
