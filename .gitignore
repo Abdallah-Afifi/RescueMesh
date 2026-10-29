@@ -4,7 +4,12 @@
 
 # Experiment output (keep summaries, not raw runs)
 /results/raw/
+/results/dev/
 /logs/
+
+# Python
+__pycache__/
+*.pyc
 
 # Editors and OS
 .DS_Store

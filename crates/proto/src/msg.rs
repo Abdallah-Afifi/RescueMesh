@@ -40,8 +40,9 @@ pub struct ClientReq {
     /// The client's latest measured round-trip time to each node, indexed by
     /// [`NodeId::index`]. `None` until measured.
     pub rtt_us: [Option<u32>; 3],
-    /// Highest `seq` of this client incarnation whose reply has been received.
-    /// Nodes may forget request-table rows at or below it.
+    /// Highest `seq` of this client incarnation such that the client is
+    /// finished with every request up to it: each was answered or given up
+    /// on. Nodes may forget request-table rows at or below it (DL-048).
     pub acked_up_to: u64,
 }
 
