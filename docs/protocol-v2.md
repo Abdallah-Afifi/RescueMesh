@@ -86,7 +86,7 @@ Each node tracks every `reqID` it has seen:
 | CLAIMED(by, viewNo) | A view member is executing | Do nothing |
 | COMMITTED(seq) | Result is in the applied log | Return the stored result |
 
-`reqID = (clientID, incarnation, clientSeq)`. The incarnation changes when a client process restarts, so a restarted client cannot reuse an old ID. Each request also carries `ackedUpTo`, the highest `clientSeq` whose reply the client has received; nodes may drop request-table rows at or below it.
+`reqID = (clientID, incarnation, clientSeq)`. The incarnation changes when a client process restarts, so a restarted client cannot reuse an old ID. Each request also carries `ackedUpTo`, the highest `clientSeq` such that the client is finished with every request up to it (answered or given up); nodes may drop request-table rows at or below it (DL-048).
 
 ### 5.3 Flow for one request
 

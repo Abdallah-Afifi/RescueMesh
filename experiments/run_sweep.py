@@ -34,12 +34,16 @@ import subprocess
 import sys
 import time
 import tomllib
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
 # ------------------------------------------------------------------ TOML output
 
+
+
+SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 def toml_value(v) -> str:
     if isinstance(v, bool):
@@ -170,6 +174,10 @@ LOADGEN_FLAGS = ["processes", "users", "mode", "rate", "think_ms", "mix", "max_i
 
 def run_one(sweep: dict, spec: dict, seed: int, cloud, clients, base_cfg: dict, args, out: Path) -> None:
     run_id = f"{sweep['name']}-{spec['label']}-s{seed}"
+    # run_id goes into remote shell commands (including rm -rf), so it must be
+    # a plain name: no spaces, globs, slashes or shell syntax.
+    if not SAFE_NAME.fullmatch(run_id):
+        raise SystemExit(f"unsafe run id {run_id!r}: sweep name and labels may use only letters, digits, '.', '_' and '-'")
     run_dir = out / run_id
     if (run_dir / "meta.json").exists() and not args.force:
         print(f"skip {run_id} (done)")

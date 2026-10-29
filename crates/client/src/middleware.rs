@@ -310,11 +310,16 @@ pub fn op_name(op: &Op) -> &'static str {
     }
 }
 
-/// Highest `n` such that replies for sequence numbers `1..=n` have all been
-/// received. Requests complete out of order when several are outstanding, and
-/// nodes may forget everything at or below this value, so it must have no
-/// gaps. A request that was given up on leaves a gap on purpose: no reply was
-/// received, so its row must stay.
+/// Highest `n` such that this client is finished with every sequence number
+/// `1..=n`: each was answered or given up on. Requests complete out of order
+/// when several are outstanding, and nodes may forget everything at or below
+/// this value, so it must have no gaps.
+///
+/// A given-up request counts as finished: the client never sends it again,
+/// and leaving it as a gap would stop the watermark for the rest of the run,
+/// so nodes could never forget this user's rows and `above` would grow
+/// without bound. A late execution of it is still harmless: the coordinator
+/// commits at most one result per request (design log DL-048).
 #[derive(Debug, Default)]
 pub struct AckTracker {
     watermark: u64,
@@ -452,8 +457,17 @@ impl Client {
                 inner
                     .retries
                     .fetch_add(u64::from(attempts - 1), Ordering::Relaxed);
+                self.acks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .complete(seq);
             }
-            Err(SubmitError::Encode(_)) => {}
+            Err(SubmitError::Encode(_)) => {
+                self.acks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .complete(seq);
+            }
         }
         out
     }

@@ -201,8 +201,8 @@ async fn gives_up_when_nobody_answers_and_logs_it() {
     }
     assert_eq!(
         user.acked_up_to(),
-        0,
-        "no reply was received, so nothing is acknowledged"
+        1,
+        "a given-up request is finished, so it must not stall the watermark"
     );
     assert_eq!(mw.stats().gave_up, 1);
     log.finish();

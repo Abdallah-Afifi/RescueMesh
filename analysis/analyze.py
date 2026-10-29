@@ -209,7 +209,16 @@ def first_by_k(df: pd.DataFrame, victim_col="node") -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def failures(run: Run, w=0.5, band_mult=1.5, band_abs_ms=5.0, hold=4, baseline_s=10.0) -> list[dict]:
+def failures(run: Run, w=0.5, band_mult=1.5, band_abs_ms=5.0, hold_s=2.0, baseline_s=10.0) -> list[dict]:
+    """Per injection: the p99 excursion and how long until it is back in band.
+
+    Failover time = from the start of the silence to the start of the first
+    run of `hold_s` seconds of in-band windows that FOLLOWS the first
+    out-of-band window. The spike often starts late (client timeout, failure
+    detection, view change), so in-band windows before it do not count.
+    `no_excursion` is true only when no window after the silence is out of band.
+    """
+    hold = max(1, int(round(hold_s / w)))
     ev = run.ev
     starts = ev[ev.kind == "inject_start"]
     if starts.empty:
@@ -233,14 +242,21 @@ def failures(run: Run, w=0.5, band_mult=1.5, band_abs_ms=5.0, hold=4, baseline_s
             b = float(np.median(base))
             band = max(b * band_mult, b + band_abs_ms)
             good = ~np.isnan(post) & (post <= band)
-            k_ok = next((i for i in range(len(post) - hold + 1) if good[i:i + hold].all()), None)
+            bad = ~np.isnan(post) & (post > band)
+            if bad.any():
+                first_bad = int(np.argmax(bad))
+                k_ok = next((i for i in range(first_bad + 1, len(post) - hold + 1)
+                             if good[i:i + hold].all()), None)
+            else:
+                k_ok = 0
             row.update(baseline_p99_ms=b, band_ms=band,
                        peak_p99_ms=float(np.nanmax(post)) if np.isfinite(post).any() else float("nan"),
                        failover_s=(k_ok * w) if k_ok is not None else float("nan"),
-                       no_excursion=bool(k_ok == 0))
+                       no_excursion=not bool(bad.any()))
             if k_ok is not None:
+                # Requests that needed a retry (protocol Section 10), not retry events.
                 rt = ev[(ev.kind == "client_retry") & (ev.t >= t0) & (ev.t < t0 + k_ok * w + w)]
-                row["retries_during"] = len(rt)
+                row["retries_during"] = int(rt.req.nunique()) if "req" in rt else len(rt)
         vc = ev[(ev.kind == "view_change") & (ev.t >= t0)]
         for _, v in vc.sort_values("t").iterrows():
             a = v.active

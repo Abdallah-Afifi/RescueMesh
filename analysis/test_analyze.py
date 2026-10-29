@@ -24,7 +24,7 @@ def ev(t, kind, machine="client1", node=None, **f):
     return d
 
 
-def synthetic_run(root: Path, name="synthetic-s1", client_offset_s=0.0):
+def synthetic_run(root: Path, name="synthetic-s1", client_offset_s=0.0, spike_delay_s=0.0, spike=True):
     """60 s at 500 ops/s, 5 ms latency. Node 1 is silenced from 30 s for 5 s:
     for the first 2 s of it, replies take 300 ms. The view change is at +0.6 s
     and the node is active again 0.4 s after the silence ends."""
@@ -34,7 +34,7 @@ def synthetic_run(root: Path, name="synthetic-s1", client_offset_s=0.0):
         t = 5 + i * 0.002  # warm-up until t=5 is not marked, measure from 10
         phase = "warmup" if t < 10 else "measure"
         lat = 5_000 + int(rng.integers(0, 1500))
-        if 30 <= t < 32:
+        if spike and 30 + spike_delay_s <= t < 32 + spike_delay_s:
             lat = 300_000
         rows.append(ev(t + client_offset_s, "client_send", req=f"r{i}", attempt=0, phase=phase))
         rows.append(ev(t + lat / 1e6 + client_offset_s, "client_reply", req=f"r{i}", attempt=int(lat > 100_000),
@@ -79,6 +79,27 @@ def test_failure_metrics_match_the_construction():
         assert 2.0 <= f["failover_s"] <= 3.0, f
         assert f["peak_p99_ms"] > 250
         assert f["retries_during"] > 100
+        # Counted per request: each slow request in the synthetic run retried once.
+        assert f["retries_during"] <= 1000
+
+
+def test_a_spike_that_starts_late_is_still_measured():
+    # The slow replies start 2.5 s after the silence: the first windows are
+    # in band, but they must not count as recovery (failover would read 0).
+    with tempfile.TemporaryDirectory() as tmp:
+        synthetic_run(Path(tmp), spike_delay_s=2.5)
+        f = analyze.failures(analyze.load_runs(Path(tmp))[0])[0]
+        assert not f["no_excursion"], f
+        assert 4.5 <= f["failover_s"] <= 5.5, f
+        assert f["peak_p99_ms"] > 250
+
+
+def test_no_spike_is_reported_as_no_excursion():
+    with tempfile.TemporaryDirectory() as tmp:
+        synthetic_run(Path(tmp), spike=False)
+        f = analyze.failures(analyze.load_runs(Path(tmp))[0])[0]
+        assert f["no_excursion"], f
+        assert f["failover_s"] == 0.0, f
 
 
 def test_clock_offsets_are_corrected():

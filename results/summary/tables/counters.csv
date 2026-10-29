@@ -1,2 +1,0 @@
-run,label,seed,election_start,election_won,step_down,suspect,view_change,replan,duplicate_suppressed,busy,commit,inject_start,replan_rate
-local,local,0,0,0,0,0,5,0,0,0,29375,5,0.0

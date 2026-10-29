@@ -343,42 +343,60 @@ Entries DL-030 to DL-037 record decisions made while implementing workstream A (
 
 ---
 
-Entries DL-E1 to DL-E6 record decisions made while implementing workstream E (`crates/client`, `crates/loadgen`, `analysis/`, `experiments/`). Numbered separately so they merge cleanly with the other workstreams' entries; renumber when merging if the team prefers.
+Entries DL-039 to DL-045 record decisions made while implementing workstream E (`crates/client`, `crates/loadgen`, `analysis/`, `experiments/`). Numbered separately so they merge cleanly with the other workstreams' entries; renumber when merging if the team prefers.
 
-## DL-E1. One connection per node per process, shared by all simulated users
+## DL-039. One connection per node per process, shared by all simulated users
 
 - Decision: a client process holds three TCP connections (one per cloud node) and multiplexes every user's requests over them. Replies are matched to waiting requests by `ReqId`.
 - Alternative: three connections per simulated user.
 - Reason: 1,000 users per machine would need 3,000 sockets and tasks, and the client machine would saturate before the cloud (DL-018). Nodes see fewer, busier connections, which is also how a real frontend behaves.
 
-## DL-E2. Client RTT is measured by TCP handshake probes
+## DL-040. Client RTT is measured by TCP handshake probes
 
 - Decision: every ~2 s the client times a fresh TCP connect to each node and keeps an exponential average (weight 1/4). That value goes into `ClientReq::rtt_us`.
 - Alternatives: reply latency (includes planning time and exists only for the one node that replied); a ping message (needs a new `proto` message).
 - Reason: the handshake is completed by the node's kernel, so it measures the network path and is not inflated by the node's load, which is what the score's communication-delay term should see. Limitation: it cannot see a silenced process (DL-014: the kernel still accepts). Silence is handled by the failure detector and by retries.
 
-## DL-E3. Retry policy details
+## DL-041. Retry policy details
 
 - Decision: same `ReqId` on every attempt; all three nodes get every attempt. Timeout = 2 s until 200 single-attempt samples exist, then 3 x the p99 of the last 4,096 first-attempt latencies (clamped to 100 ms..30 s), times `backoff_factor`^attempt, with +-25% jitter. A `Busy` or `Error` reply cuts the wait short and resends after 50 ms x factor^attempt (50-150% jitter). At most `max_retries` resends; then the request is reported as `gave_up`.
 - `acked_up_to` is a gap-free watermark: the highest n with replies for every seq 1..=n. A given-up request leaves a gap on purpose, so nodes keep its request-table row.
 - Latency is measured on the client's own clock from the first send to the first `Ok` reply, so a failover shows up as retried requests with high latency, which is what a user experiences.
 
-## DL-E3b. Event fields added by the client
+## DL-042. Event fields added by the client
 
 - `client_send`/`client_reply`/`client_retry` carry `phase` (`warmup`, `measure`, `cooldown`) and `op`. `client_reply.latency_us` is from the first send; `attempt_latency_us` from the latest send. Outcomes: `ok`, `busy`, `error`, `gave_up` (no `from`). `resource_sample` from a client process adds `cpu_core_permille`, `submitted`, `completed`, `gave_up`, `dropped_client`; the frontend's has `scope = "machine"`. `clock_offset` adds `when` (`start`/`end`).
 - Clock-offset convention (everyone who logs `clock_offset` must follow it): `offset_ns` is positive when the machine's clock is ahead of the reference; corrected = local - offset.
 
-## DL-E4. Workload: seeded mix, open and closed loop, explicit phases
+## DL-043. Workload: seeded mix, open and closed loop, explicit phases
 
 - Decision: each user draws operations from `hash(seed, machine, process, user)`, so the sequence is the same in every run (which resource an update targets depends on which offers have completed). Open loop: Poisson arrivals on a drift-free schedule, dropped and counted when a process has `max_inflight` outstanding. Closed loop: one outstanding request per user plus optional exponential think time. All processes share one wall-clock `start_at`; warm-up, measured window and drain are fixed from it, and requests are classified by the phase in which they start.
 - Reason: open loop for latency curves (a slow system cannot slow the offered load, so there is no coordinated omission); closed loop for peak throughput. `dropped_client > 0` is reported as a warning because it means the client machine limited the load.
 
-## DL-E5. Statistics
+## DL-044. Statistics
 
 - Decision: percentiles are computed per run from every measured request; confidence intervals are the 95% Student-t interval over the per-seed values (at least five seeds). Failover time = from the start of the silence until the 0.5 s-window p99 of completions stays within max(1.5 x baseline, baseline + 5 ms) for 2 s; baseline = median window p99 over the 10 s before. Empty windows count as breaches. Also reported: time to the committed `VIEW` removal, recovery time (end of silence to `active`), retries during the excursion.
 - Reason: runs are the independent samples; pooling requests across a run would give far too narrow intervals because requests within a run are correlated.
 
-## DL-E6. A stand-in cloud for client-side development
+## DL-045. A stand-in cloud for client-side development
 
 - Decision: `client::testkit::StubCluster` (and the `rm-stub` binary) speaks the real client protocol with a fixed service time, a bounded worker pool, `Busy` replies and silencing on the real seeded schedule. It writes node-side events so the analysis can be exercised end to end.
 - Reason: the load generator, retry logic and analysis had to be tested before the nodes exist (M1). It is a test fixture; its numbers are never reported.
+
+---
+
+Entries DL-048 and DL-049 come from the review of the `client-loadgen` branch before it was merged, 2026-10-29.
+
+## DL-048. `ackedUpTo` counts given-up requests as finished
+
+- Date: 2026-10-29. Status: agreed (integration review of workstream E). Refines protocol Section 5.2.
+- Problem: the client's watermark counted only answered requests. One given-up request left a permanent gap, so for the rest of the run that user's `ackedUpTo` never advanced. Nodes could never forget its rows, and the client's set of out-of-order completions grew without bound. In the first stand-in run 12% of requests gave up, so almost every user would stall in a failure experiment.
+- Decision: `ackedUpTo` is the highest sequence number such that the client is finished with every request up to it, answered or given up. The client never sends a given-up request again.
+- Safety: a late execution of a given-up request is still harmless. The coordinator commits at most one result per request (I1), and selection keeps a per-incarnation high-water mark so a delayed copy is not executed again after its row is gone (DL-046).
+
+## DL-049. Failover time is measured from the first out-of-band window
+
+- Date: 2026-10-29. Status: agreed (integration review). Corrects the failover definition of DL-044.
+- Problem: the analysis took the failover time as the first point after the silence where 2 s of windows were back in band, searching from the silence itself. When the latency spike started 2 s or more after the silence, which is typical (client timeout, failure detection, view change), the windows before the spike counted as recovery. The result was 0 s and "no excursion" for exactly the worst failovers; the first stand-in summary already contained one such row.
+- Decision: recovery is searched for only after the first out-of-band window. `no_excursion` means no window after the silence was out of band. The hold is set in seconds (`hold_s`, 2 s), not in windows, so changing `--window-ms` keeps the 2 s rule. `retries_during` counts requests that needed a retry, not retry events.
+- Evidence: a new test with a spike starting 2.5 s late fails on the previous code and passes now. A no-spike test checks the other branch.

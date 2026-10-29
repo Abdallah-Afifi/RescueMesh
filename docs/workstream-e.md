@@ -12,7 +12,7 @@ target/release/rm-stub --config config/local.toml --silence-every-s 15 --silence
 # terminal 2: 4 processes x 50 users, open loop, 600 ops/s, 5 s warm-up, 40 s measured
 target/release/rm-loadgen run --config config/local.toml --machine 1 \
     --processes 4 --users 50 --mode open --rate 600 --warmup-secs 5 --duration-secs 40
-python analysis/analyze.py logs --out results/summary
+python analysis/analyze.py logs --out results/dev
 ```
 
 Swap `rm-stub` for `rm-node --config ... --id N` (three terminals) once the nodes exist; nothing else changes.
@@ -24,7 +24,7 @@ Swap `rm-stub` for `rm-node --config ... --id N` (three terminals) once the node
 3. `python experiments/run_sweep.py experiments/example-sweep.toml`
 4. `python analysis/analyze.py results/raw --out results/summary`
 
-`run_sweep.py` writes each run to `results/raw/<run_id>/` (git-ignored) with a `meta.json`; commit `results/summary/` only.
+`run_sweep.py` writes each run to `results/raw/<run_id>/` (git-ignored) with a `meta.json`; commit `results/summary/` only, and only from real sweeps. Stand-in-cloud and local demo output goes to `results/dev/`, which is git-ignored (stub numbers are never reported, DL-045).
 
 ## Command reference
 
@@ -32,7 +32,7 @@ Swap `rm-stub` for `rm-node --config ... --id N` (three terminals) once the node
 
 ## What each piece records
 
-Every client process writes `logs/<run_id>/client<machine>-<process>.jsonl` (events per `proto::event`, plus the fields in DL-E3b) and a `.summary.json`; the frontend writes `client<machine>-frontend.jsonl` (hardware, clock offsets, machine CPU/network once a second) and `client<machine>-summary.json`.
+Every client process writes `logs/<run_id>/client<machine>-<process>.jsonl` (events per `proto::event`, plus the fields in DL-042) and a `.summary.json`; the frontend writes `client<machine>-frontend.jsonl` (hardware, clock offsets, machine CPU/network once a second) and `client<machine>-summary.json`.
 
 ## For the other workstreams
 
