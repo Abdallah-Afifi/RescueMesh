@@ -18,11 +18,22 @@
 //!    its ranking, and claims when that is itself ([`Selector::tick`]).
 //! 4. When two claims for one request meet, the lower claim key wins
 //!    everywhere; a node whose own claim loses aborts its execution
-//!    ([`Selector::on_claim`]). Because every node keeps the lowest key it
-//!    has seen, all nodes agree on the winner once all claims are delivered.
+//!    ([`Selector::on_claim`]). Every node keeps every valid claim it has
+//!    received, so all nodes agree on the winner once all claims are
+//!    delivered, whatever order they arrive in.
 //! 5. A CLAIMED request moves to another node only when its claimer leaves
 //!    the view, never because time has passed (Section 5.4,
-//!    [`Selector::set_view`]). A slow executor keeps its request.
+//!    [`Selector::set_view`]). It moves to the lowest remaining claim if
+//!    there is one, so survivors agree on the successor without new
+//!    messages; only when no claim is left is the request ranked again.
+//!    A slow executor keeps its request.
+//!
+//! A claim is valid if its sender has been in the view continuously since
+//! the view number the claim carries (design log DL-046). A claim made just
+//! before a view change by a node that stays in the view is therefore still
+//! honoured, while a claim from a node that left the view, even if it was
+//! later re-admitted, is not. The coordinator's view check at commit
+//! (invariant I5, DL-035) remains the final guard.
 //!
 //! The coordinator's duplicate check (invariant I1) makes any execution that
 //! slips through harmless: only one result per request is ever committed.
@@ -84,7 +95,8 @@ pub struct Stats {
     pub competing_claims: u64,
     /// Claimed requests returned to SEEN because the claimer left the view.
     pub takeovers: u64,
-    /// Claims ignored because they carried an older view.
+    /// Claims ignored because their sender was not continuously in the view
+    /// since the view the claim carries.
     pub stale_claims: u64,
     /// Client retries answered from a committed result.
     pub retries_answered: u64,
@@ -101,7 +113,6 @@ enum State {
     },
     Claimed {
         by: NodeId,
-        key: ClaimKey,
     },
     Committed {
         seq: Seq,
@@ -120,6 +131,26 @@ struct Row {
     /// only seen a peer's claim for it, or after it committed.
     req: Option<ClientReq>,
     state: State,
+    /// Every valid claim received for this request, by claimer: the view it
+    /// was made in and its key. The lowest key is the executor.
+    claims: BTreeMap<NodeId, (ViewNo, ClaimKey)>,
+}
+
+impl Row {
+    fn new(req: Option<ClientReq>) -> Row {
+        Row {
+            req,
+            state: NOT_RANKED,
+            claims: BTreeMap::new(),
+        }
+    }
+
+    fn winner(&self) -> Option<(NodeId, ClaimKey)> {
+        self.claims
+            .iter()
+            .map(|(&n, &(_, k))| (n, k))
+            .min_by_key(|&(_, k)| k)
+    }
 }
 
 /// Executor selection for one cloud node. Performs no I/O and reads no clock.
@@ -134,6 +165,12 @@ pub struct Selector {
     active: bool,
     peers: BTreeMap<NodeId, PeerScore>,
     rows: BTreeMap<ReqId, Row>,
+    /// For each view member, the view number from which it has been a
+    /// member without interruption.
+    member_since: BTreeMap<NodeId, ViewNo>,
+    /// Highest `acked_up_to` seen per client incarnation, so a late duplicate
+    /// of an acknowledged request is not executed again after its row is gone.
+    acked: BTreeMap<(ClientId, u32), u64>,
     stats: Stats,
 }
 
@@ -154,6 +191,8 @@ impl Selector {
             active: false,
             peers: BTreeMap::new(),
             rows: BTreeMap::new(),
+            member_since: BTreeMap::new(),
+            acked: BTreeMap::new(),
             stats: Stats::default(),
         }
     }
@@ -188,28 +227,61 @@ impl Selector {
     }
 
     /// The core applied a new view, or its ACTIVE status changed
-    /// (`Core::is_active`). Claims by nodes that left the view are taken over
-    /// (Section 5.4); requests still waiting for a claim are ranked again
-    /// over the new view.
+    /// (`Core::is_active`). Claims by nodes that left the view are dropped:
+    /// the lowest remaining claim becomes the executor, and a request with no
+    /// claim left is ranked again over the new view (Section 5.4). Requests
+    /// still waiting for a claim are ranked again too. Calling it with an
+    /// unchanged view and status does nothing.
     pub fn set_view(&mut self, now: u64, view: View, active: bool) -> Vec<Action> {
+        if view == self.view && active == self.active {
+            return Vec::new();
+        }
+        for &n in view.active() {
+            if !self.view.contains(n) || !self.member_since.contains_key(&n) {
+                self.member_since.insert(n, view.no);
+            }
+        }
+        self.member_since.retain(|n, _| view.contains(*n));
         self.view = view;
         self.active = active;
+
         let mut out = Vec::new();
         let ids: Vec<ReqId> = self.rows.keys().copied().collect();
         for id in ids {
-            let rerank = match self.rows.get(&id).map(|r| &r.state) {
-                Some(State::Claimed { by, .. }) if !self.view.contains(*by) => {
-                    if *by == self.me {
+            let Some(row) = self.rows.get_mut(&id) else {
+                continue;
+            };
+            let held = match &row.state {
+                State::Committed { .. } => continue,
+                State::Claimed { by, .. } => Some(*by),
+                State::Seen { .. } => None,
+            };
+            let (view, member_since) = (&self.view, &self.member_since);
+            row.claims
+                .retain(|&n, &mut (v, _)| claim_valid(view, member_since, n, v));
+            match (held, row.winner()) {
+                (None, _) => out.extend(self.rank(now, id)),
+                (Some(by), Some((w, _))) if w != by => {
+                    // The executor left; the lowest remaining claim takes over.
+                    self.stats.takeovers += 1;
+                    row.state = State::Claimed { by: w };
+                    if by == self.me {
                         out.push(Action::Abort(id));
                     }
-                    self.stats.takeovers += 1;
-                    true
+                    if w == self.me
+                        && let Some(req) = row.req.clone()
+                    {
+                        out.push(Action::Execute(req));
+                    }
                 }
-                Some(State::Seen { .. }) => true,
-                _ => false,
-            };
-            if rerank {
-                out.extend(self.rank(now, id));
+                (Some(_), Some(_)) => {}
+                (Some(by), None) => {
+                    self.stats.takeovers += 1;
+                    if by == self.me {
+                        out.push(Action::Abort(id));
+                    }
+                    out.extend(self.rank(now, id));
+                }
             }
         }
         out
@@ -221,8 +293,12 @@ impl Selector {
     /// runtime from applied state (`StateMachine::query`, design log DL-019).
     pub fn on_request(&mut self, now: u64, req: ClientReq) -> Vec<Action> {
         let id = req.req.id;
-        self.forget_acked(id.client, id.incarnation, req.acked_up_to);
-        if req.acked_up_to > 0 && id.seq <= req.acked_up_to {
+        let acked = self.acked.entry((id.client, id.incarnation)).or_insert(0);
+        if req.acked_up_to > *acked {
+            *acked = req.acked_up_to;
+            self.forget_acked(id.client, id.incarnation, req.acked_up_to);
+        }
+        if id.seq <= self.acked[&(id.client, id.incarnation)] {
             // The client already holds the reply to this one.
             return Vec::new();
         }
@@ -244,13 +320,7 @@ impl Selector {
                 State::Seen { .. } => row.req = Some(req),
             },
             None => {
-                self.rows.insert(
-                    id,
-                    Row {
-                        req: Some(req),
-                        state: NOT_RANKED,
-                    },
-                );
+                self.rows.insert(id, Row::new(Some(req)));
             }
         }
         self.rank(now, id)
@@ -264,52 +334,45 @@ impl Selector {
         view: ViewNo,
         key: ClaimKey,
     ) -> Vec<Action> {
-        // Invariant I5: a claim made under an older view is ignored.
-        if view < self.view.no || (view == self.view.no && !self.view.contains(from)) {
+        if !claim_valid(&self.view, &self.member_since, from, view) {
             self.stats.stale_claims += 1;
             return Vec::new();
         }
-        // Local correction: the claimer is busier than its last heartbeat said.
-        self.bump_claims(from);
-
-        let row = self.rows.entry(id).or_insert(Row {
-            req: None,
-            state: NOT_RANKED,
-        });
-        match &row.state {
-            State::Committed { .. } => Vec::new(),
-            State::Seen { .. } => {
-                row.state = State::Claimed { by: from, key };
-                Vec::new()
-            }
-            State::Claimed { by, key: held } => {
-                if *by == from {
-                    return Vec::new(); // the same claim delivered twice
-                }
-                self.stats.competing_claims += 1;
-                if key >= *held {
-                    return Vec::new(); // ours, or the one we hold, wins
-                }
-                let mine_lost = *by == self.me;
-                row.state = State::Claimed { by: from, key };
-                if mine_lost {
-                    self.stats.claims_lost += 1;
-                    vec![Action::Abort(id)]
-                } else {
-                    Vec::new()
-                }
-            }
+        let row = self.rows.entry(id).or_insert_with(|| Row::new(None));
+        if matches!(row.state, State::Committed { .. }) {
+            return Vec::new();
+        }
+        if row.claims.get(&from) == Some(&(view, key)) {
+            return Vec::new(); // the same claim delivered twice
+        }
+        let first_from_sender = row.claims.insert(from, (view, key)).is_none();
+        if row.claims.len() > 1 && first_from_sender {
+            self.stats.competing_claims += 1;
+        }
+        let held = match row.state {
+            State::Claimed { by, .. } => Some(by),
+            _ => None,
+        };
+        let (w, _) = row.winner().expect("a claim was just stored");
+        row.state = State::Claimed { by: w };
+        if first_from_sender {
+            // Local correction: the claimer is busier than its last heartbeat said.
+            self.bump_claims(from);
+        }
+        if held == Some(self.me) && w != self.me {
+            self.stats.claims_lost += 1;
+            vec![Action::Abort(id)]
+        } else {
+            Vec::new()
         }
     }
 
     /// The core applied a `Result` entry. Retries of this request are now
     /// answered with the stored result, and nobody executes it again.
     pub fn on_committed(&mut self, id: ReqId, seq: Seq, result: OpResult) {
-        let row = self.rows.entry(id).or_insert(Row {
-            req: None,
-            state: NOT_RANKED,
-        });
+        let row = self.rows.entry(id).or_insert_with(|| Row::new(None));
         row.req = None;
+        row.claims.clear();
         row.state = State::Committed { seq, result };
     }
 
@@ -438,7 +501,8 @@ impl Selector {
         let key = score::claim_key(&self.cfg, &req, &self.peer(self.me));
         let view = self.view.no;
         if let Some(row) = self.rows.get_mut(&id) {
-            row.state = State::Claimed { by: self.me, key };
+            row.claims.insert(self.me, (view, key));
+            row.state = State::Claimed { by: self.me };
         }
         self.bump_claims(self.me);
         self.stats.claims_made += 1;
@@ -466,6 +530,25 @@ impl Selector {
             self.rows.remove(&id);
         }
     }
+}
+
+/// A claim from `from` made in view `claimed_in` is valid if `from` has been
+/// a member continuously since that view (design log DL-046). A claim from a
+/// view this node has not applied yet is kept; it is checked again when that
+/// view is applied.
+fn claim_valid(
+    view: &View,
+    member_since: &BTreeMap<NodeId, ViewNo>,
+    from: NodeId,
+    claimed_in: ViewNo,
+) -> bool {
+    if claimed_in > view.no {
+        return true;
+    }
+    view.contains(from)
+        && member_since
+            .get(&from)
+            .is_some_and(|&since| claimed_in >= since)
 }
 
 #[cfg(test)]
@@ -642,21 +725,54 @@ pub(crate) mod tests {
         assert_eq!(c[second.index()].stats().claims_lost, 1);
     }
 
-    #[test]
-    fn claims_from_an_older_view_are_ignored() {
-        let mut s = node(1, RankerKind::MwbeCached);
-        s.set_view(0, View::new(ViewNo(2), NodeId::ALL.to_vec()), true);
-        let key = ClaimKey {
+    fn key_of(n: u8) -> ClaimKey {
+        ClaimKey {
             score_step: 0,
             tie: 0,
-            node: NodeId(2),
-        };
-        assert!(
-            s.on_claim(NodeId(2), req(1).req.id, ViewNo(1), key)
-                .is_empty()
-        );
-        assert_eq!(s.row_state(&req(1).req.id), None);
-        assert_eq!(s.stats().stale_claims, 1);
+            node: NodeId(n),
+        }
+    }
+
+    #[test]
+    fn a_claim_from_a_member_that_never_left_survives_a_view_change() {
+        // View 1 to view 2 removes node 3; node 2 stays a member throughout.
+        // Its claim made in view 1, arriving after view 2 is applied, counts.
+        let mut s = node(1, RankerKind::MwbeCached);
+        s.set_view(0, full_view().without(NodeId(3)), true);
+        let id = req(1).req.id;
+        assert!(s.on_claim(NodeId(2), id, ViewNo(1), key_of(2)).is_empty());
+        assert_eq!(s.row_state(&id), Some(RowState::Claimed(NodeId(2))));
+        assert_eq!(s.stats().stale_claims, 0);
+    }
+
+    #[test]
+    fn claims_from_before_a_node_left_the_view_are_ignored() {
+        // Node 2 is removed in view 2 and re-admitted in view 3: its claims
+        // from views 1 and 2 are stale, its claims from view 3 count.
+        let mut s = node(1, RankerKind::MwbeCached);
+        s.set_view(0, full_view().without(NodeId(2)), true);
+        let id = req(1).req.id;
+        assert!(s.on_claim(NodeId(2), id, ViewNo(2), key_of(2)).is_empty());
+        s.set_view(0, View::new(ViewNo(3), NodeId::ALL.to_vec()), true);
+        assert!(s.on_claim(NodeId(2), id, ViewNo(1), key_of(2)).is_empty());
+        assert!(s.on_claim(NodeId(2), id, ViewNo(2), key_of(2)).is_empty());
+        assert_eq!(s.row_state(&id), None);
+        assert_eq!(s.stats().stale_claims, 3);
+        s.on_claim(NodeId(2), id, ViewNo(3), key_of(2));
+        assert_eq!(s.row_state(&id), Some(RowState::Claimed(NodeId(2))));
+    }
+
+    #[test]
+    fn a_claim_from_a_view_not_yet_applied_is_checked_when_it_is() {
+        // Node 3 claims in view 2, which this node has not applied yet.
+        let mut s = node(1, RankerKind::MwbeCached);
+        let id = req(1).req.id;
+        s.on_claim(NodeId(3), id, ViewNo(2), key_of(3));
+        assert_eq!(s.row_state(&id), Some(RowState::Claimed(NodeId(3))));
+        // View 2 turns out not to contain node 3: the claim is dropped and
+        // the request ranked again (here: never received, so left unranked).
+        s.set_view(0, View::new(ViewNo(2), vec![NodeId(1), NodeId(2)]), true);
+        assert_eq!(s.row_state(&id), Some(RowState::Seen));
     }
 
     // ---------------------------------------------------------- view changes
@@ -689,6 +805,116 @@ pub(crate) mod tests {
         // The removed node, if it hears about its removal, aborts.
         let out = c[winner.index()].set_view(10, new_view, false);
         assert!(out.contains(&Action::Abort(id)));
+    }
+
+    #[test]
+    fn survivors_agree_on_the_successor_whatever_order_they_learn_things() {
+        // X claims with the lowest key; Y and Z hold it. X is removed. Y
+        // applies the new view first, takes over and claims; Z still holds
+        // X's lower key when Y's claim arrives, and only then applies the
+        // view. Both must end with Y as the single executor.
+        let mut c = cluster();
+        let r = req(1);
+        let outs: Vec<Vec<Action>> = c.iter_mut().map(|s| s.on_request(0, r.clone())).collect();
+        let order = ranking(&outs[0]);
+        let (x, y, z) = (order[0], order[1], order[2]);
+        let (id, view, kx) = claim_of(&outs[x.index()]).unwrap();
+        c[y.index()].on_claim(x, id, view, kx);
+        c[z.index()].on_claim(x, id, view, kx);
+
+        let v2 = full_view().without(x);
+        let out_y = c[y.index()].set_view(10, v2.clone(), true);
+        let (_, vy, ky) = claim_of(&out_y).expect("y ranks first among survivors and claims");
+        assert!(out_y.iter().any(|a| matches!(a, Action::Execute(_))));
+        assert!(c[z.index()].on_claim(y, id, vy, ky).is_empty());
+        let out_z = c[z.index()].set_view(10, v2, true);
+        assert!(claim_of(&out_z).is_none(), "z must not claim: {out_z:?}");
+        assert!(!out_z.iter().any(|a| matches!(a, Action::Execute(_))));
+        assert_eq!(c[z.index()].row_state(&id), Some(RowState::Claimed(y)));
+        assert_eq!(c[y.index()].row_state(&id), Some(RowState::Claimed(y)));
+        // No timeout ever makes z claim it either.
+        assert!(c[z.index()].tick(1_000_000).is_empty());
+    }
+
+    #[test]
+    fn a_node_whose_losing_claim_is_left_resumes_executing() {
+        // Y's claim lost to X's lower key, so Y aborted. When X leaves the
+        // view, Y's stored claim is the lowest remaining: Y executes again
+        // without sending anything, and Z, holding the same two claims,
+        // agrees.
+        let mut c = cluster();
+        let r = req(1);
+        let outs: Vec<Vec<Action>> = c.iter_mut().map(|s| s.on_request(0, r.clone())).collect();
+        let order = ranking(&outs[0]);
+        let (x, y, z) = (order[0], order[1], order[2]);
+        let (id, view, kx) = claim_of(&outs[x.index()]).unwrap();
+        let tc = c[y.index()].claim_timeout_ms();
+        let (_, vy, ky) = claim_of(&c[y.index()].tick(tc)).unwrap();
+        assert_eq!(
+            c[y.index()].on_claim(x, id, view, kx),
+            vec![Action::Abort(id)]
+        );
+        c[z.index()].on_claim(x, id, view, kx);
+        c[z.index()].on_claim(y, id, vy, ky);
+
+        let v2 = full_view().without(x);
+        let out_y = c[y.index()].set_view(20, v2.clone(), true);
+        assert!(
+            out_y.iter().any(|a| matches!(a, Action::Execute(_))),
+            "{out_y:?}"
+        );
+        assert!(claim_of(&out_y).is_none(), "its claim is already known");
+        let out_z = c[z.index()].set_view(20, v2, true);
+        assert!(out_z.is_empty(), "{out_z:?}");
+        assert_eq!(c[z.index()].row_state(&id), Some(RowState::Claimed(y)));
+    }
+
+    #[test]
+    fn by_default_missed_heartbeats_seen_by_one_node_do_not_change_its_ranking() {
+        // Only node 1 sees node 3 miss heartbeats. With the default weights
+        // every node must still rank every request identically (DL-047).
+        let mut c = cluster();
+        for (i, s) in c.iter_mut().enumerate() {
+            for n in NodeId::ALL {
+                let busy = u32::from(n.0) * 5;
+                s.on_heartbeat(n, load(busy, 300 + u16::from(n.0) * 40, busy));
+            }
+            if i == 0 {
+                s.set_missed(NodeId(3), 1000);
+            }
+        }
+        for seq in 1..=500 {
+            let r = req_with_rtt(seq, [Some(4_000), Some(9_000), Some(2_000)]);
+            let rankings: Vec<Vec<NodeId>> = c
+                .iter()
+                .map(|s| s.ranker.rank(&r, &s.view, &s.scores()))
+                .collect();
+            assert_eq!(rankings[0], rankings[1], "request {seq}");
+            assert_eq!(rankings[1], rankings[2], "request {seq}");
+        }
+    }
+
+    #[test]
+    fn a_duplicate_claim_is_counted_once_in_the_local_correction() {
+        let mut s = node(1, RankerKind::MwbeCached);
+        let id = req(1).req.id;
+        let before = s.peer(NodeId(2)).claims_since_heartbeat;
+        s.on_claim(NodeId(2), id, ViewNo(1), key_of(2));
+        s.on_claim(NodeId(2), id, ViewNo(1), key_of(2));
+        assert_eq!(s.peer(NodeId(2)).claims_since_heartbeat, before + 1);
+        assert_eq!(s.stats().competing_claims, 0);
+    }
+
+    #[test]
+    fn a_late_duplicate_of_an_acknowledged_request_is_not_executed() {
+        let mut s = node(3, RankerKind::HighestId);
+        assert!(claim_of(&s.on_request(0, req(1))).is_some());
+        let mut next = req(2);
+        next.acked_up_to = 1; // the client has the reply to seq 1
+        s.on_request(1, next);
+        assert_eq!(s.row_state(&req(1).req.id), None, "row forgotten");
+        // A delayed copy of seq 1, carrying the old acked_up_to of 0, arrives.
+        assert!(s.on_request(2, req(1)).is_empty());
     }
 
     #[test]

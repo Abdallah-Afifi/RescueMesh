@@ -49,7 +49,7 @@ These are the properties the implementation must preserve and the tests must che
 - **I2. No lost commits.** An entry acknowledged to a client is held by a majority, so it survives any single silenced node.
 - **I3. No double assignment.** A committed plan's assignments were computed from the resource versions that are current at its `seq`.
 - **I4. One coordinator per epoch.** Entries and commands from an older epoch are rejected.
-- **I5. Only view members execute.** A `CLAIM` carrying an older `viewNo` is ignored.
+- **I5. Only view members execute.** The coordinator commits a result only from an executor in its current view (DL-035). Selection ignores a `CLAIM` whose sender has not been in the view continuously since the `viewNo` the claim carries (DL-046).
 
 Liveness: with two of three nodes ACTIVE and messages eventually delivered, every request is eventually committed and answered.
 
@@ -63,7 +63,7 @@ Lower is better. Each term is clamped to [0, 1].
 S_i = w_q * min(q_i / Q_MAX, 1)      queue length
     + w_c * c_i                      CPU utilisation, already in [0, 1]
     + w_s * min(s_i / S_MAX, 1)      EWMA of recent service time
-    + w_f * f_i                      fraction of i's recent heartbeats missed, as seen by the ranking node
+    + w_f * f_i                      fraction of i's recent heartbeats missed, as seen by the ranking node (w_f = 0 by default, DL-047)
     + w_r * min(rtt_i / R_MAX, 1)    client-measured RTT to node i, taken from the request
 ```
 

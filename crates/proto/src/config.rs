@@ -114,6 +114,10 @@ impl Default for Timeouts {
 
 /// Score parameters (Section 5.1). Weights are in thousandths and must sum
 /// to 1000, so the score is integer arithmetic on every node.
+///
+/// `w_missed` defaults to 0: each node measures missed heartbeats itself, so
+/// a non-zero weight makes nodes rank from different inputs (design log
+/// DL-047).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ScoreCfg {
@@ -131,11 +135,11 @@ pub struct ScoreCfg {
 impl Default for ScoreCfg {
     fn default() -> Self {
         ScoreCfg {
-            w_queue: 200,
-            w_cpu: 200,
-            w_service: 200,
-            w_missed: 200,
-            w_rtt: 200,
+            w_queue: 250,
+            w_cpu: 250,
+            w_service: 250,
+            w_missed: 0,
+            w_rtt: 250,
             queue_cap: 64,
             service_cap_ms: 500,
             rtt_cap_ms: 50,

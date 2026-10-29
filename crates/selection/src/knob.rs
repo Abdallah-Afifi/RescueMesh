@@ -14,6 +14,19 @@ use std::time::{Duration, Instant};
 /// Length of one busy/idle cycle.
 const PERIOD: Duration = Duration::from_millis(10);
 
+/// Highest duty cycle allowed, in thousandths. Leaves every burner core some
+/// idle time, so the heartbeat thread and the core task still get scheduled.
+pub const MAX_DUTY_PERMILLE: u16 = 900;
+
+/// Most burner threads allowed: one core is always left free. Saturating
+/// every core would delay heartbeats, get the node suspected and removed from
+/// the view, and turn the load-imbalance demo into a failover demo.
+pub fn max_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .saturating_sub(1)
+}
+
 /// Burns `duty_permille` thousandths of each `threads` CPU cores until stopped
 /// or dropped.
 pub struct CpuBurner {
@@ -22,12 +35,13 @@ pub struct CpuBurner {
 }
 
 impl CpuBurner {
-    /// Starts `threads` burner threads, each busy for `duty_permille`
-    /// thousandths (capped at 1000) of every 10 ms period.
+    /// Starts `threads` burner threads (at most [`max_threads`]), each busy
+    /// for `duty_permille` thousandths (at most [`MAX_DUTY_PERMILLE`]) of
+    /// every 10 ms period.
     pub fn start(threads: usize, duty_permille: u16) -> CpuBurner {
         let stop = Arc::new(AtomicBool::new(false));
-        let busy = PERIOD * u32::from(duty_permille.min(1000)) / 1000;
-        let threads = (0..threads)
+        let busy = PERIOD * u32::from(duty_permille.min(MAX_DUTY_PERMILLE)) / 1000;
+        let threads = (0..threads.min(max_threads()))
             .map(|_| {
                 let stop = Arc::clone(&stop);
                 std::thread::spawn(move || burn(&stop, busy))
@@ -77,6 +91,14 @@ mod tests {
     fn burner_starts_and_stops() {
         let b = CpuBurner::start(2, 500);
         std::thread::sleep(Duration::from_millis(30));
+        b.stop();
+    }
+
+    #[test]
+    fn the_burner_always_leaves_a_core_free() {
+        let b = CpuBurner::start(10_000, 1000);
+        assert!(b.threads.len() <= max_threads());
+        assert!(b.threads.len() < std::thread::available_parallelism().map_or(1, |n| n.get()));
         b.stop();
     }
 

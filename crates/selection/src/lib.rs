@@ -25,7 +25,8 @@
 //! | every 5 ms or so | [`Selector::tick`] |
 //! | a client `Req` arrives | [`Selector::on_request`] |
 //! | a peer's `Claim` arrives | [`Selector::on_claim`] |
-//! | a heartbeat arrives, or this node sends its own | [`Selector::on_heartbeat`] |
+//! | a heartbeat arrives, or this node sends its own (in order: drop one older than the last from that node) | [`Selector::on_heartbeat`] |
+//! | the failure detector's missed-heartbeat share for a peer changes (weight 0 by default, DL-047) | [`Selector::set_missed`] |
 //! | the core applies a `View` entry, or `Core::is_active` changes | [`Selector::set_view`] |
 //! | the core applies a `Result` entry | [`Selector::on_committed`] |
 //! | the measured peer round-trip time changes | [`Selector::set_peer_rtt_ms`] |
@@ -39,6 +40,20 @@
 //! | `Execute` | queues the request on the planning pool; the result goes to `Core::propose` |
 //! | `Abort` | drops the request from the planning queue if it has not been proposed yet |
 //! | `Reply` | sends the stored result to the client (a retry of a committed request) |
+//!
+//! Three rules keep every request answered (a claimed request is never
+//! taken back by time, so the runtime must not strand it):
+//!
+//! - **Never drop an `Execute`.** It may come from `tick` or `set_view`, not
+//!   only from `on_request`, so the planning queue must accept it.
+//! - **Reply `Busy` before selection, not after.** When the planning queue is
+//!   full, answer the client `Busy` and do not pass the request to
+//!   `on_request`. This node then takes no part, its peers' claim timeout moves
+//!   the request on, and the client retries (design log DL-017).
+//! - **Always commit something.** If planning is rejected as stale more than
+//!   `timeouts.max_replans` times, propose `OpResult::Refused` so the request
+//!   commits and its retries are answered. A `NotInView` outcome needs no
+//!   action: the view change that caused it reaches `set_view`.
 //!
 //! After each call the runtime may pass [`Selector::rank1_hint`] to
 //! `Core::set_rank1_hint`, so the operator can silence the node currently

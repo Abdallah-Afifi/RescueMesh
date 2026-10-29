@@ -127,7 +127,15 @@ mod tests {
     /// The worked example used in the team's explanation of MWBE.
     #[test]
     fn worked_example() {
-        let cfg = ScoreCfg::default();
+        // Equal weights of 200 on all five terms, as when the example was worked.
+        let cfg = ScoreCfg {
+            w_queue: 200,
+            w_cpu: 200,
+            w_service: 200,
+            w_missed: 200,
+            w_rtt: 200,
+            ..ScoreCfg::default()
+        };
         let req = req_with_rtt(1, [Some(25_000), Some(10_000), Some(25_000)]);
         let n1 = peer(1, 16, 500, 250);
         let n2 = peer(2, 32, 800, 250);
