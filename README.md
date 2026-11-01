@@ -41,12 +41,12 @@ cargo run -p node -- --config config/local.toml --id 1  # one cloud node
 | `crates/proto` | shared | Types, messages, traits, config, event schema. Changes need a design-log entry. |
 | `crates/replication` | A | Replicated log, coordinator election, view, rejoin, fault injection. Fully tested (see design log DL-037). |
 | `crates/selection` | C | Executor selection: MWBE score, baseline policies, request table, claims, load knob (see design log DL-038). |
-| `crates/node` | A–D | Core task `NodeTask` (replication + selection + planning pool, DL-052) and the cloud node binary `rm-node` |
+| `crates/node` | A–D | Core task `NodeTask` (replication + selection + planning pool, DL-052); runtime, transport, heartbeats and φ-accrual failure detector (B, DL-053–055, `docs/workstream-b.md`); the cloud node binary `rm-node` |
 | `crates/client` | E | Client middleware library: multicast, retries, RTT probes, event-log writer, `testkit` stand-in cloud |
 | `crates/loadgen` | E | Workload generator and frontend `rm-loadgen`; stand-in cloud `rm-stub` |
 | `analysis/` | E | `analyze.py`: logs to tables and plots |
 | `experiments/` | E | `run_sweep.py`: configurations x seeds on the six machines |
-| `crates/ctl` | A | Operator tool `rm-ctl` (status, targeted silence) |
+| `crates/ctl` | A, B | Operator tool `rm-ctl` (status, targeted silence) |
 
 ## Working agreements
 
