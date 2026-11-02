@@ -232,7 +232,7 @@ pub struct Core {
 
 /// Objects whose version the read-set check compares (invariant I3):
 /// resources, and incidents, so two plans cannot both assign one waiting
-/// incident (design log DL-054). Both are keyed by the creating `ReqId`.
+/// incident (design log DL-057). Both are keyed by the creating `ReqId`.
 fn versioned_ids(writes: &[Write]) -> impl Iterator<Item = ReqId> + '_ {
     writes.iter().filter_map(|w| match w {
         Write::PutResource(r) => Some(r.id),

@@ -198,16 +198,16 @@ fn no_resource_ever_gives_out_more_units_than_it_has() {
 #[test]
 fn when_two_incidents_want_one_responder_the_more_urgent_wins() {
     let mut n = Node::new(10);
-    // A minor incident waits with no one available.
+    // Both wait with no technician; the minor one has waited longer.
     let minor = rid(1, 1);
+    let critical = rid(3, 1);
     n.run(req(minor, 0, report(Category::NetworkOutage, 1, 0)));
-    n.run(req(rid(2, 1), 100, offer(ResourceKind::Technician, 1, 0)));
-    // A critical one arrives far away: it gets the only technician.
-    let critical = req(rid(3, 1), 200, report(Category::NetworkOutage, 5, 15));
-    let out = n.run(critical.clone());
-    let p = planned(&out);
-    assert_eq!(p.assignments.len(), 1);
-    assert_eq!(p.priority, 5_000);
+    n.run(req(critical, 100, report(Category::NetworkOutage, 5, 15)));
+    // One technician appears near the minor incident: the critical one gets it.
+    let out = n.run(req(rid(2, 1), 200, offer(ResourceKind::Technician, 1, 0)));
+    assert!(out.writes.iter().any(
+        |w| matches!(w, Write::PutIncident(i) if i.id == critical && i.status == IncidentStatus::Assigned)
+    ));
     let q = n
         .state
         .query(&req(rid(4, 1), 300, Op::Query(Query::Incident(minor))));
@@ -215,16 +215,99 @@ fn when_two_incidents_want_one_responder_the_more_urgent_wins() {
 }
 
 #[test]
-fn a_waiting_incident_is_picked_up_by_a_later_plan() {
+fn a_waiting_incident_is_picked_up_when_capacity_is_offered() {
     let mut n = Node::new(10);
     let waiting = rid(1, 1);
     n.run(req(waiting, 0, report(Category::PowerOutage, 3, 4)));
-    n.run(req(rid(2, 1), 100, offer(ResourceKind::Generator, 4, 4)));
-    // An unrelated report re-dispatches, and the generator goes to the waiting incident.
-    let out = n.run(req(rid(3, 1), 200, report(Category::LabIncident, 1, 9)));
+    // The offer itself dispatches the generator to the waiting incident.
+    let out = n.run(req(rid(2, 1), 100, offer(ResourceKind::Generator, 4, 4)));
     assert!(out.writes.iter().any(|w| matches!(w, Write::PutIncident(i) if i.id == waiting && i.status == IncidentStatus::Assigned)));
     let a = &n.state.assignments()[&(waiting, rid(2, 1))];
     assert_eq!(a.units, units_needed(Severity(3)));
+}
+
+#[test]
+fn a_report_writes_only_its_own_incident_and_resource() {
+    let mut n = Node::new(10);
+    // Two incidents wait for a generator nobody has offered.
+    n.run(req(rid(1, 1), 0, report(Category::PowerOutage, 2, 4)));
+    n.run(req(rid(1, 2), 10, report(Category::PowerOutage, 4, 5)));
+    n.run(req(rid(2, 1), 20, offer(ResourceKind::Medic, 2, 9)));
+    // A new medical report: it may only touch itself and the medic, so it
+    // never collides with another report over the waiting incidents.
+    let new = rid(3, 1);
+    let out = n.run(req(new, 30, report(Category::MedicalAssistance, 2, 9)));
+    for w in &out.writes {
+        match w {
+            Write::PutIncident(i) => assert_eq!(i.id, new),
+            Write::PutResource(r) => assert_eq!(r.id, rid(2, 1)),
+            Write::PutAssignment(a) => assert_eq!(a.incident, new),
+        }
+    }
+}
+
+#[test]
+fn an_update_never_frees_units_that_are_assigned() {
+    let mut n = Node::new(10);
+    let vehicle = rid(1, 1);
+    n.run(req(vehicle, 0, offer(ResourceKind::Vehicle, 3, 2)));
+    // A critical road block takes all three units.
+    n.run(req(rid(2, 1), 10, report(Category::BlockedRoad, 5, 2)));
+    // The owner says it can offer 3 again: the 3 assigned units stay assigned.
+    n.run(req(
+        rid(1, 2),
+        20,
+        Op::UpdateResource {
+            resource: vehicle,
+            available: 3,
+            extend_lease_ms: None,
+        },
+    ));
+    let out = n.run(req(rid(3, 1), 30, report(Category::BlockedRoad, 5, 2)));
+    assert!(
+        !out.writes
+            .iter()
+            .any(|w| matches!(w, Write::PutAssignment(a) if a.resource == vehicle)),
+        "the second incident must not get units already given out"
+    );
+    let given: u32 = n
+        .state
+        .assignments()
+        .values()
+        .filter(|a| a.resource == vehicle)
+        .map(|a| a.units)
+        .sum();
+    assert!(given <= 3, "{given} units handed out from a capacity of 3");
+}
+
+#[test]
+fn an_update_that_frees_capacity_dispatches_waiting_incidents() {
+    let mut n = Node::new(10);
+    let vehicle = rid(1, 1);
+    n.run(req(vehicle, 0, offer(ResourceKind::Vehicle, 3, 2)));
+    // The owner withdraws all units; a flood then has to wait.
+    n.run(req(
+        rid(1, 2),
+        10,
+        Op::UpdateResource {
+            resource: vehicle,
+            available: 0,
+            extend_lease_ms: None,
+        },
+    ));
+    let flood = rid(2, 1);
+    n.run(req(flood, 20, report(Category::Flooding, 3, 2)));
+    // Units come back: the update itself assigns them to the flood.
+    let out = n.run(req(
+        rid(1, 3),
+        30,
+        Op::UpdateResource {
+            resource: vehicle,
+            available: 3,
+            extend_lease_ms: None,
+        },
+    ));
+    assert!(out.writes.iter().any(|w| matches!(w, Write::PutIncident(i) if i.id == flood && i.status == IncidentStatus::Assigned)));
 }
 
 #[test]
@@ -310,8 +393,9 @@ fn only_the_owner_updates_a_resource_and_availability_never_exceeds_capacity() {
     let q = n
         .state
         .query(&req(rid(1, 3), 20, Op::Query(Query::Resource(r))));
+    // The owner now offers 50 units in total; none were assigned.
     assert!(
-        matches!(q, OpResult::Resource(Some(o)) if o.available == 3 && o.expires_at_ms == 301_000)
+        matches!(q, OpResult::Resource(Some(o)) if o.available == 50 && o.capacity == 50 && o.expires_at_ms == 301_000)
     );
 }
 

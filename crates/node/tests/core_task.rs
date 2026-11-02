@@ -280,7 +280,15 @@ fn the_real_planner_keeps_assignments_consistent_under_faults() {
         let mut state = State::new();
         let mut capacity = BTreeMap::new();
         let mut assigned = 0;
+        let (mut results, mut gave_up) = (0usize, 0usize);
         for e in &log {
+            if let EntryKind::Result { result, .. } = &e.kind {
+                results += 1;
+                if matches!(result, proto::OpResult::Refused(why) if why.contains("kept changing"))
+                {
+                    gave_up += 1;
+                }
+            }
             if let EntryKind::Result { writes, .. } = &e.kind {
                 for w in writes {
                     match w {
@@ -315,6 +323,14 @@ fn the_real_planner_keeps_assignments_consistent_under_faults() {
         assert!(
             per_incident.values().all(|&c| c == 1),
             "seed {seed}: an incident got two responders"
+        );
+        // Concurrent plans must rarely collide: a request refused after the
+        // re-plan cap is lost to its client (DL-062). Typically under 1%; the
+        // worst seed seen was 6.7%, at 200 requests/s with one planning
+        // thread, where queued jobs plan from old snapshots (DL-063).
+        assert!(
+            gave_up * 10 <= results,
+            "seed {seed}: {gave_up} of {results} requests gave up after re-planning"
         );
     }
 }

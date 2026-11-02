@@ -1,4 +1,4 @@
-//! The deterministic planner (design log DL-020, DL-053, DL-054).
+//! The deterministic planner (design log DL-020, DL-056, DL-057).
 //!
 //! A report is planned as a fresh dispatch of the most urgent waiting
 //! incidents, the new one always among them:
@@ -17,7 +17,7 @@
 //! 4. **Prioritized responder list**: for up to `top_k` capable responders,
 //!    the whole assignment is solved again with the new incident forced onto
 //!    that responder, and responders are ranked by the resulting total cost.
-//!    This is the step that makes planning cost real CPU (DL-056): about
+//!    This is the step that makes planning cost real CPU (DL-059): about
 //!    `top_k` further solves, so the knob's effect is roughly cubic.
 //!
 //! Every incident the solution assigns is written, with its resource, so an
@@ -172,7 +172,13 @@ impl IncidentPlanner {
         let mut writes = Vec::new();
         let mut mine = Vec::new();
         let mut route = vec![new.zone];
-        for (a, ((incident, iv), &col)) in rows.iter().zip(&chosen).enumerate() {
+        // Only row 0, the new incident, is written. The waiting incidents take
+        // part in the solve, so the new one does not take a responder a more
+        // urgent incident should have, but they are not reassigned here: every
+        // concurrent report would then write the same waiting incidents and
+        // all but one would be rejected as stale (DL-062). Waiting incidents
+        // are dispatched when capacity appears, by offers and updates.
+        for (a, ((incident, iv), &col)) in rows.iter().zip(&chosen).enumerate().take(1) {
             let mut incident = (*incident).clone();
             let pair = (col < m && cost[a][col] < NEVER).then(|| resources[col]);
             if let Some((r, rv)) = pair {
@@ -194,8 +200,6 @@ impl IncidentPlanner {
                 }
                 writes.push(Write::PutAssignment(assignment));
                 writes.push(Write::PutResource(r));
-            } else if a > 0 {
-                continue; // still waiting, nothing to write
             }
             read_set.push((incident.id, *iv));
             writes.push(Write::PutIncident(incident));
@@ -215,6 +219,53 @@ impl IncidentPlanner {
 }
 
 impl IncidentPlanner {
+    /// Gives `r`'s free units to the most urgent waiting incidents it can
+    /// serve (at most `top_k` of them), most urgent first. Called when
+    /// capacity appears: a new offer, or an update that frees units. Writes
+    /// only `r` and the incidents it is assigned to, so it rarely collides
+    /// with concurrent plans (DL-062).
+    fn dispatch_waiting(
+        &self,
+        snap: &Snapshot,
+        now: u64,
+        mut r: ResourceOffer,
+        read_set: &mut Vec<(ResourceId, Version)>,
+        writes: &mut Vec<Write>,
+    ) {
+        if r.expires_at_ms > now {
+            let mut waiting: Vec<(&Incident, Version)> = snap
+                .incidents
+                .values()
+                .filter(|(i, _)| {
+                    i.status == IncidentStatus::Open
+                        && i.reported_at_ms.saturating_add(i.ttl_ms) > now
+                        && capable(i.category).contains(&r.kind)
+                })
+                .map(|(i, v)| (i, *v))
+                .collect();
+            waiting.sort_by_key(|(i, _)| (std::cmp::Reverse(priority(i, now)), i.id));
+            for (i, iv) in waiting.into_iter().take(self.top_k) {
+                if r.available == 0 {
+                    break;
+                }
+                let units = units_needed(i.severity).min(r.available);
+                r.available -= units;
+                let mut incident = i.clone();
+                incident.status = IncidentStatus::Assigned;
+                writes.push(Write::PutAssignment(Assignment {
+                    incident: i.id,
+                    resource: r.id,
+                    units,
+                    created_at_ms: now,
+                    expires_at_ms: i.reported_at_ms.saturating_add(i.ttl_ms),
+                }));
+                read_set.push((i.id, iv));
+                writes.push(Write::PutIncident(incident));
+            }
+        }
+        writes.push(Write::PutResource(r));
+    }
+
     /// Capable responders for row 0, best first by the total cost of the
     /// whole assignment when row 0 is forced onto each. Ties go to the
     /// responder the main solve chose, then to the lower ID. Row 0 of `cost`
@@ -293,17 +344,22 @@ impl Planner for IncidentPlanner {
                 if *capacity == 0 || *lease_ms == 0 {
                     return refused("capacity and lease must be positive");
                 }
+                let offer = ResourceOffer {
+                    id: req.id,
+                    owner,
+                    kind: *kind,
+                    capacity: *capacity,
+                    available: *capacity,
+                    zone: *zone,
+                    expires_at_ms: now.saturating_add(*lease_ms),
+                };
+                // A new resource has no version to check; the incidents it is
+                // given to do.
+                let (mut read_set, mut writes) = (Vec::new(), Vec::new());
+                self.dispatch_waiting(snap, now, offer, &mut read_set, &mut writes);
                 PlanOutput {
-                    read_set: vec![],
-                    writes: vec![Write::PutResource(ResourceOffer {
-                        id: req.id,
-                        owner,
-                        kind: *kind,
-                        capacity: *capacity,
-                        available: *capacity,
-                        zone: *zone,
-                        expires_at_ms: now.saturating_add(*lease_ms),
-                    })],
+                    read_set,
+                    writes,
                     result: OpResult::Accepted,
                 }
             }
@@ -319,13 +375,23 @@ impl Planner for IncidentPlanner {
                     return refused("only the owner may update a resource");
                 }
                 let mut r = r.clone();
-                r.available = (*available).min(r.capacity);
+                // `available` is how many units the owner now offers in total,
+                // assigned ones included. Units already assigned stay assigned
+                // and cannot be withdrawn, so capacity never drops below them
+                // and `capacity == assigned + available` always holds; a unit
+                // can never be given out twice (DL-062).
+                let assigned = r.capacity - r.available;
+                r.capacity = (*available).max(assigned);
+                r.available = r.capacity - assigned;
                 if let Some(ext) = extend_lease_ms {
                     r.expires_at_ms = r.expires_at_ms.max(now).saturating_add(*ext);
                 }
+                let mut read_set = vec![(r.id, *v)];
+                let mut writes = Vec::new();
+                self.dispatch_waiting(snap, now, r, &mut read_set, &mut writes);
                 PlanOutput {
-                    read_set: vec![(r.id, *v)],
-                    writes: vec![Write::PutResource(r)],
+                    read_set,
+                    writes,
                     result: OpResult::Accepted,
                 }
             }

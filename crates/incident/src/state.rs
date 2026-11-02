@@ -4,7 +4,7 @@
 //! The planning snapshot is shared with planning threads through an `Arc`, so
 //! applying an entry while a plan holds the old snapshot copies it. The
 //! snapshot is therefore kept small: every resource, but only open incidents
-//! and no assignments (DL-055). Full state lives beside it for queries.
+//! and no assignments (DL-058). Full state lives beside it for queries.
 
 use proto::{
     Assignment, Entry, EntryKind, Incident, IncidentId, IncidentStatus, OpResult, Query, Request,
@@ -28,6 +28,10 @@ pub struct State {
     /// Latest client timestamp seen in a committed write. Pruning compares
     /// against this, never against a local clock, so it is deterministic.
     latest_ms: u64,
+    /// Last applied entry. The snapshot's own `applied` is the last entry
+    /// that changed it: entries without writes leave the snapshot alone, so
+    /// they never force a copy while planning jobs hold it.
+    applied: Seq,
 }
 
 impl State {
@@ -51,9 +55,13 @@ impl State {
 impl StateMachine for State {
     fn apply(&mut self, entry: &Entry) {
         let version = Version::from(entry.seq);
-        let s = Arc::make_mut(&mut self.snap);
-        s.applied = entry.seq;
-        if let EntryKind::Result { writes, .. } = &entry.kind {
+        self.applied = entry.seq;
+        if let EntryKind::Result { writes, .. } = &entry.kind
+            && !writes.is_empty()
+        {
+            // Copy-on-write: copies the snapshot only if a job still holds it.
+            let s = Arc::make_mut(&mut self.snap);
+            s.applied = entry.seq;
             for w in writes {
                 match w {
                     Write::PutIncident(i) => {
@@ -93,7 +101,7 @@ impl StateMachine for State {
     }
 
     fn applied(&self) -> Seq {
-        self.snap.applied
+        self.applied
     }
 
     fn query(&self, req: &Request) -> OpResult {

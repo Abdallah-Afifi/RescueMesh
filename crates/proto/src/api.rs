@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// everywhere so iteration order is identical on every machine.
 ///
 /// Holds every resource but only the incidents still `Open`, each with the
-/// version the coordinator compares (DL-054, DL-055). Planning never reads
+/// version the coordinator compares (DL-057, DL-058). Planning never reads
 /// assigned or resolved incidents or assignments; leaving them out keeps the
 /// copy each commit makes small. Full state is answered by
 /// [`StateMachine::query`].
@@ -37,7 +37,7 @@ pub struct PlanOutput {
     /// Every incident and resource the plan writes, with the version it saw.
     /// The coordinator rejects the plan if any has changed (I3). Objects the
     /// plan only considered are left out: a change to them can make the plan
-    /// less than optimal but never invalid (DL-054).
+    /// less than optimal but never invalid (DL-057).
     pub read_set: Vec<(ResourceId, Version)>,
     pub writes: Vec<Write>,
     pub result: OpResult,

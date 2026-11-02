@@ -1,4 +1,4 @@
-//! The planning worker pool (design log DL-017, DL-057): a bounded set of OS
+//! The planning worker pool (design log DL-017, DL-060): a bounded set of OS
 //! threads that run the [`Planner`] on immutable snapshots and hand results
 //! back through a callback. Planning threads never touch protocol state.
 //!
@@ -119,12 +119,21 @@ fn work(
             }
         } else {
             let started = Instant::now();
-            let out = planner.plan(&job.snapshot, &job.req.req);
+            // A planner panic must not kill the worker and strand a claimed
+            // request (rule: never drop an Execute): it becomes a refusal.
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                planner.plan(&job.snapshot, &job.req.req)
+            }))
+            .unwrap_or_else(|_| PlanOutput {
+                read_set: vec![],
+                writes: vec![],
+                result: OpResult::Refused("planning failed".into()),
+            });
             let took = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
             let _ =
                 shared
                     .service_ewma_us
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
                         Some(if old == 0 {
                             took
                         } else {

@@ -300,7 +300,7 @@ fn scheduled_injections_silence_one_node_at_a_time_and_it_recovers() {
 
 #[test]
 fn two_plans_writing_one_incident_cannot_both_commit() {
-    // DL-054: incidents are versioned like resources, so a waiting incident
+    // DL-057: incidents are versioned like resources, so a waiting incident
     // assigned by one committed plan makes a concurrent plan for it stale.
     use proto::{Category, Incident, IncidentStatus, OpResult, Severity, Version, Write, ZoneId};
     let mut sim = started(4);

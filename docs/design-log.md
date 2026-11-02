@@ -479,9 +479,9 @@ Entries DL-050 and DL-051 close the minor items left from the 2026-10-29 integra
 
 ---
 
-Entries DL-053 to DL-058 record decisions made while implementing workstream D (`crates/incident`, `crates/node/src/workers.rs`), 2026-11-01. Owner: Youssef.
+Entries DL-056 to DL-061 record decisions made while implementing workstream D (`crates/incident`, `crates/node/src/workers.rs`), 2026-11-01. Owner: Youssef.
 
-## DL-053. Planner details
+## DL-056. Planner details
 
 - Date: 2026-11-01. Status: proposed. Refines DL-020.
 - Decision:
@@ -494,7 +494,7 @@ Entries DL-053 to DL-058 record decisions made while implementing workstream D (
 - Alternatives: putting distance and availability into the priority as well. Rejected: the same quantities would be counted twice, and the plan would be harder to explain.
 - Evidence: `crates/incident/tests/planner.rs` (more urgent wins, capability respected, units never over-given, determinism).
 
-## DL-054. Plans re-dispatch waiting incidents; incidents are versioned at the coordinator
+## DL-057. Plans re-dispatch waiting incidents; incidents are versioned at the coordinator
 
 - Date: 2026-11-01. Status: proposed. Changes `replication::core` and the `PlanOutput::read_set` contract; Abdallah to review.
 - Decision:
@@ -505,9 +505,9 @@ Entries DL-053 to DL-058 record decisions made while implementing workstream D (
   - Write only the new incident's assignment. Rejected: a waiting high-priority incident would win a resource in every later solve without ever being written, so that resource would sit idle until the incident expired.
   - Put every considered resource in the read set. Rejected: any commit that touches any resource would make every concurrent plan stale, which serializes commits and wastes most planning work.
 - Reason: a change to an object a plan only considered can make the plan less than optimal, never invalid; I3 needs only the written objects unchanged.
-- Evidence: `two_plans_writing_one_incident_cannot_both_commit` (replication) fails on the old coordinator and passes on the new; the real-planner chaos test (DL-058) finds incidents with two responders on the old coordinator and none on the new.
+- Evidence: `two_plans_writing_one_incident_cannot_both_commit` (replication) fails on the old coordinator and passes on the new; the real-planner chaos test (DL-061) finds incidents with two responders on the old coordinator and none on the new.
 
-## DL-055. The planning snapshot holds open incidents only, and expired items are pruned
+## DL-058. The planning snapshot holds open incidents only, and expired items are pruned
 
 - Date: 2026-11-01. Status: proposed.
 - Decision:
@@ -515,7 +515,7 @@ Entries DL-053 to DL-058 record decisions made while implementing workstream D (
   - At every entry whose `seq` is a multiple of 1024, incidents and resources that expired more than 60 s before the latest client timestamp in a committed write are dropped from the snapshot.
 - Reason: a planning thread holds an `Arc` of the snapshot, so applying an entry copies it. Over a run of tens of thousands of reports, copying every incident on every commit would make the core task, which applies entries, the bottleneck. Pruning uses log position and committed timestamps, never a local clock, so every node prunes identically.
 
-## DL-056. A prioritized responder list makes the cost knob real
+## DL-059. A prioritized responder list makes the cost knob real
 
 - Date: 2026-11-01. Status: proposed. Adds `Plan::responders`.
 - Problem: measured on its own, the assignment step took 0.23 ms at `top_k` 100. Most incident–resource pairs are incompatible, so the Hungarian algorithm finishes far below its worst case. At that cost the nodes are network-bound and load balancing has nothing to balance.
@@ -534,7 +534,7 @@ Entries DL-053 to DL-058 record decisions made while implementing workstream D (
 - Alternatives: a busy-loop or repeated identical solves. Rejected: CPU spent on nothing the client receives is a sleep in disguise and would be hard to defend in the report.
 - Evidence: `service_time_against_top_k` (ignored by default; run with `--release -- --ignored --nocapture`).
 
-## DL-057. The planning worker pool
+## DL-060. The planning worker pool
 
 - Date: 2026-11-01. Status: proposed. Implements DL-017 and the `PlanPool` rules of DL-052.
 - Decision:
@@ -544,10 +544,35 @@ Entries DL-053 to DL-058 record decisions made while implementing workstream D (
   - **Load sample**: queue length counts queued and running jobs; service time is a moving average with weight 1/8 on the newest plan; CPU is this whole process's share of the machine, from `sysinfo`, re-measured at most once per `sysinfo`'s minimum interval. Measuring the whole process means the load knob's burner threads raise the score, which the load-imbalance demo relies on.
 - Evidence: five unit tests in `workers.rs` (every job planned once past the limit, re-plan cap, cancellation, service-time average, clean shutdown).
 
-## DL-058. An executor answers from the committed entry, not its own copy
+## DL-061. An executor answers from the committed entry, not its own copy
 
 - Date: 2026-11-01. Status: proposed. Changes `node::task`; Abdallah to review.
 - Problem found: with the real planner in the three-node chaos simulator, seed 5 answered a client with a plan different from the committed one. Sequence: a retransmitted `PROPOSE` drew two `Stale` replies; the executor re-planned on the first and that plan committed; the second, late `Stale` was taken as the answer to the new plan, so the executor re-planned again and overwrote its copy; the coordinator then reported `Committed` (it matches by executor) and the executor answered from the overwritten copy. The fake planner rarely produced `Stale`, so this had not appeared.
 - Decision: on `Committed(seq)` the executor answers with the result in the committed entry. If the entry is not yet applied locally, it answers when that entry is applied.
 - Alternatives: tag each proposal with an attempt number so late replies can be discarded. Rejected for now: it changes the wire protocol for a race that answering from the log already makes harmless.
 - Evidence: `the_real_planner_keeps_assignments_consistent_under_faults` (node) passes 40 seeds, as does the existing chaos test; before the fix, seed 5 failed.
+
+## DL-062. Waiting incidents are dispatched when capacity appears; updates never free assigned units
+
+- Date: 2026-11-02. Status: agreed (integration review of workstream D). Changes DL-057 and the update semantics of DL-056.
+- Problems found:
+  - `UpdateResource` set `available` directly, ignoring units already assigned. A 3-unit vehicle assigned in full, then updated to 3, was handed out a second time: 6 units from a capacity of 3.
+  - Every report plan also reassigned and wrote the waiting incidents it touched. Concurrent reports therefore all wrote the same waiting incidents, and all but one were rejected as stale. In the reviewer's chaos runs up to 46% of requests ended `Refused` after the re-plan cap; the client got an answer, but the report was lost.
+- Decisions:
+  - A report plan writes only its own new incident and, if it gets one, that incident's resource. The waiting incidents still take part in the solve, so the new incident does not take a responder a more urgent one should have.
+  - Waiting incidents are dispatched by the plan that makes capacity appear: a new offer, or an update. That plan gives the resource's free units to the most urgent capable waiting incidents, at most `top_k` of them, and writes only that resource and those incidents.
+  - `UpdateResource { available }` sets how many units the owner offers in total, assigned ones included. Capacity never drops below the assigned units, so `capacity == assigned + available` always holds and a unit can never be given out twice.
+- Evidence:
+  - New planner tests: an update after a full assignment hands out nothing more; an update that frees units dispatches a waiting incident; an offer dispatches waiting incidents, most urgent first; a report writes only its own incident and resource.
+  - The real-planner chaos test now sends resource updates, and its audit of `assigned + available == capacity` covers them.
+  - Give-ups after the re-plan cap fell from up to 46% to under 1% on 15 of 16 seeds (DL-063).
+
+## DL-063. Re-plan only after catching up; known limit under overload
+
+- Date: 2026-11-02. Status: agreed. Refines DL-052.
+- Decision: after a `Stale` rejection the executor waits until it has applied the log up to the coordinator's position at the rejection, at most 500 ms, before planning again. Planning at once read the same old snapshot and was rejected again. A late duplicate `Stale` for a send already re-planned is ignored.
+- Also:
+  - The state machine copies its snapshot only for entries that write something, so view, no-op and injection entries never force a copy while planning jobs hold the snapshot.
+  - A planner panic becomes a `Refused` result instead of killing a worker and stranding a claimed request.
+  - `PROTOCOL_VERSION` is now 2, because `Plan` gained `responders`.
+- Known limit: a job plans from the snapshot taken when it was queued. Under overload, with long queues and one planning thread at 200 requests/s, about 7% of requests still give up after the re-plan cap; on every other measured seed it is under 1%. The fix is to take the snapshot when a job starts. That changes the pool interface shared by workstreams B and D, so it is deferred past the 2 November code freeze.

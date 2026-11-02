@@ -4,7 +4,7 @@
 //! ([`IncidentPlanner`], a [`proto::Planner`]) over the synthetic campus map.
 //! The planning worker pool that runs the planner is `node::workers`.
 //!
-//! Design decisions: DL-020, DL-053 to DL-056 in `docs/design-log.md`.
+//! Design decisions: DL-020, DL-056 to DL-059 in `docs/design-log.md`.
 
 pub mod graph;
 pub mod hungarian;

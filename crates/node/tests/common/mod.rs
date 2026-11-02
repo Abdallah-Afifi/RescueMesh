@@ -175,7 +175,23 @@ fn mixed_op(seq: u64) -> Op {
         Category::Flooding,
         Category::BlockedRoad,
     ];
-    if seq.is_multiple_of(4) {
+    if seq % 8 == 2 && seq >= 50 {
+        // The same user offered a resource 50 requests earlier (seq - 50 is a
+        // multiple of 4): change how many units it offers, sometimes to 0.
+        Op::UpdateResource {
+            resource: ReqId {
+                client: ClientId {
+                    machine: 1,
+                    process: 1,
+                    user: (seq % 50) as u32,
+                },
+                incarnation: 3,
+                seq: seq - 50,
+            },
+            available: (seq / 8 % 5) as u32,
+            extend_lease_ms: None,
+        }
+    } else if seq.is_multiple_of(4) {
         Op::OfferResource {
             kind: KINDS[(seq / 4 % 4) as usize],
             capacity: 1 + (seq % 3) as u32,
