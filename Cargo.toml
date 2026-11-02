@@ -10,6 +10,7 @@ publish = false
 [workspace.dependencies]
 proto = { path = "crates/proto" }
 client = { path = "crates/client" }
+loadgen = { path = "crates/loadgen" }
 replication = { path = "crates/replication" }
 selection = { path = "crates/selection" }
 serde = { version = "1.0.229", features = ["derive"] }

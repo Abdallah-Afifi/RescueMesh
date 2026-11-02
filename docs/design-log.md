@@ -476,3 +476,59 @@ Entries DL-050 and DL-051 close the minor items left from the 2026-10-29 integra
   - A `Stale` outcome sends the request back to the pool with its attempt number. The planner returns `Refused` once the attempt exceeds `max_replans` (workstream D's rule).
   - Heartbeats older than the last one from the same process are dropped.
 - Evidence: seven end-to-end tests with three full nodes and fake pools. Four deliberately broken versions are each caught: no Busy check, the Busy check skipped for new requests, `Execute` dropped when full, and no re-planning. A chaos test with message loss, injected silences, isolations and pools of 2 to 32 slots passes 50 seeds; every client gets exactly the committed result.
+
+---
+
+Entries DL-053 to DL-055 record decisions made while implementing workstream B (`crates/node`: `net`, `link`, `heartbeat`, `fd`, `runtime`), 2026-11-01.
+
+## DL-053. Heartbeats and the φ-accrual failure detector
+
+- Date: 2026-11-01. Status: agreed. Owner: Hanna. Implements Section 6 of the protocol and the detector values of DL-024.
+- Decision:
+  - Heartbeats are UDP datagrams sent every `timeouts.heartbeat_ms` from a dedicated OS thread (`node::heartbeat`), which also receives them and runs one detector per peer. The thread never waits for the core task or the planning pool. The core task refreshes the heartbeat's content (epoch, coordinator, view, commit, load) once per interval through a shared slot; the thread stamps its own sequence number `n`.
+  - Detector (`node::fd`): sliding window of the last 100 inter-arrival times, normal model, `φ = −log10 Q((t − μ)/σ)`. Suspect when `φ > fd_phi_threshold`, which is the same as a timeout `T_d = μ + z·σ` with `Q(z) = 10^−threshold` (z ≈ 5.61 for φ = 8). `T_d` is clamped to `[fd_min_ms, fd_max_ms]` = 300–1000 ms. σ is kept at least a tenth of the heartbeat interval, so a perfectly regular LAN cannot make φ infinite. Until two samples exist, μ = the heartbeat interval and σ = a quarter of it.
+  - **Rejoin.** A gap longer than `fd_max_ms` is never a sample. When a suspected peer is heard again its window is cleared and rebuilt, so a 20 s silence does not distort the estimate.
+  - **Own silence.** While this node is silenced the thread sends nothing and drops what it receives. On waking it restarts every detector's timeout from now: the gap was its own.
+  - The detector reports changes to the core task, which turns a suspicion into a `VIEW` entry (DL-006). The core's `suspect` event is enriched with `phi`, `silent_ms`, `timeout_ms` and `samples`, so detection time can be read from the logs without a second event kind.
+- Alternatives: a fixed timeout (does not adapt to load or network); heartbeats on the async runtime or the core thread (planning load could delay them, the false-suspicion risk DL-017 exists to avoid).
+- Evidence: unit tests for the tail function and its inverse, regular and erratic arrivals, the floor and the ceiling, rejoin, start-up and own-silence restart. On localhost (`crates/node/tests/runtime_localhost.rs`), a silenced follower is removed from the view about 250–280 ms after it went quiet, within the 300–1000 ms bound when measured from its last heartbeat; with every core saturated by planning threads (three nodes, each with as many spinning threads as cores, pools full), no node was suspected over a 6 s run.
+
+## DL-054. Transport: threads, connections, preambles, acknowledgment
+
+- Date: 2026-11-01. Status: agreed. Owner: Hanna. Implements DL-014; changes the "asynchronous task per connection" part of DL-017.
+- Amends DL-014 in three ways, agreed at the integration review on 2026-11-02: two TCP connections per pair of nodes instead of one, retransmission with exponential backoff up to 1.6 s and bursts of at most 256 instead of a fixed `retransmit_ms`, and a cap of 4,096 unacknowledged bodies per peer. Above the cap the oldest bodies are dropped while the peer is still in the view; the replication core resends `Append`, `Propose` and `Join` and claims time out, so only a forwarded operator `Silence` can be lost.
+- Decisions:
+  - **Threads, not async tasks.** The node uses OS threads with blocking `std::net` sockets: one acceptor, one reader per inbound connection, one writer per peer and per client connection, the heartbeat thread, the core thread and the planning threads. With three nodes and a few dozen client processes per run (DL-039) this is under two hundred threads, well within what an OS schedules easily, and blocking code is simpler to reason about and to test. The single core task owning all protocol state (DL-017) is unchanged. `tokio` remains in use on the client side.
+  - **One port, three kinds of connection,** told apart by the first four bytes: `RMP1` plus a node-id byte for a peer, `RMO1` for the operator tool, anything else for a client. A client frame starts with a 4-byte length of at most 16 MiB, whose first byte is 0x00 or 0x01, never `R`, so clients need no preamble and `crates/client` is unchanged.
+  - **Two connections per pair of nodes,** one per direction: each node dials each peer for its own outgoing messages and reads incoming messages on the connections the peers dialed. A writer thread per peer reconnects with back-off (50 ms doubling to 1 s).
+  - **Acknowledgment** (`node::link`): per-direction streams numbered from 1 under `msg_id.incarnation`; cumulative `ack_up_to` piggybacked on every envelope; a bare `Ack` with `n = 0` after `ack_delay_ms` if nothing else carried it; bare acks are never numbered, acknowledged or retransmitted. Receivers deliver each number once and accept out-of-order numbers (the protocol tolerates reordering; waiting for a gap would stall live traffic behind a retransmission).
+  - **Retransmission** of the oldest unacknowledged messages after `retransmit_ms`, at most 256 per round, with the interval doubling up to 16 × `retransmit_ms` (at least 1 s) while nothing is acknowledged, and reset by any progress, a reconnect or waking from silence. A peer silenced for 20 s therefore costs a trickle, not a flood.
+  - **Giving up on content.** "Retransmit until acknowledged or until the peer leaves the view" is implemented by turning queued bodies into `Ack` *fillers* that keep their numbers, when the peer leaves the committed view and when more than 4096 bodies are waiting. The receiver still gets every number, so its cumulative acknowledgment can advance; stale content (old votes, appends the core resends anyway) is not replayed.
+  - **Peer restart** (outside the failure model) is detected from a new heartbeat incarnation, and the link to that peer then restarts its stream. Detecting it from stream incarnations instead could make two links restart each other forever.
+  - **Silence switch** in the transport: inbound envelopes and client requests are read and dropped before they are acknowledged or delivered, nothing is sent, new outgoing messages are discarded, and TCP connections stay open, so the node looks exactly like a process that stopped responding.
+  - **Replies** are routed by `ClientId` to the connection that last carried a request from that user.
+  - **Operator channel:** after `RMO1`, one text command per line, `status` or `silence <1|2|3|coordinator|rank1> <ms>`; the answer is one line (`ok: …`, `error: …`, or the status as JSON). It needs no new types in `proto`. Status is answered even while the node is silenced, so the demo can watch it; a silenced node refuses `silence`. `rm-ctl` implements both commands, which `experiments/run_sweep.py` already calls.
+  - **Shared code:** the node writes its event log with `client::EventLog` and takes its resource, machine and clock samples from `loadgen::sampler`, so every process logs the same way. Each node logs a `resource_sample` per second with `scope = "node"`, CPU, RSS, network bytes, queue length and the message counters (heartbeats, new messages, retransmissions, bare acks, duplicates, client requests and replies) needed for the overhead measurements, and a `clock_offset` every 30 s (nodes are killed at the end of a run, so there is no "end" sample).
+- Evidence: unit tests for numbering, piggybacked and bare acks, backoff and the burst limit, stale acks, out-of-order delivery, fillers, the body cap, peer restart, and 1000 messages over a link with 30% loss in both directions (all delivered exactly once). Four localhost tests with real sockets: election and 60 client requests served by all three nodes; an operator silence detected, served around and rejoined; the coordinator silenced, a new one elected and the old one re-admitted; and no false suspicion under CPU saturation.
+
+## DL-055. A placeholder planner until the incident service is merged
+
+- Date: 2026-11-01. Status: temporary. Owner: Hanna (to be removed by Youssef).
+- Decision: `node::dev` holds a minimal `StateMachine` and planning pool so `rm-node` runs end to end now. The planner follows the contract (pure, deterministic, read set recorded, `Refused` after `max_replans`) but plans no assignments. `rm-node --dev-spin-us N` burns N µs of CPU per plan for load tests. The runtime takes the state machine and a pool factory as parameters (`runtime::start`, `PoolFactory`, `PlanSink`), so workstream D replaces both in `crates/node/src/main.rs` and nothing else changes.
+- Numbers measured with the placeholder are never reported.
+
+## DL-064. Runtime fixes from the integration review
+
+- Date: 2026-11-02. Status: agreed (integration review of workstream B).
+- **No false suspicion on waking.** The heartbeat thread re-read the silence flag in its detection step, after a receive wait of up to 5 ms. The silence usually ended during that wait, so the detectors ran before being restarted, against heartbeats from before the silence. The woken node suspected both peers after every injection (3 of 3 in the reviewer's probe). That inflated the false-suspicion count and delayed its `Join`. The detection step now uses the value read at the top of the loop. A regression test checks that the victim logs no `suspect` after `inject_end`; it fails on the previous code.
+- **Client connections are closed on every writer exit.** After a write error or the 5 s write timeout, the writer returned without shutting the socket. The node kept executing that client's requests but never answered them. Both directions are now shut down on every exit, so the client reconnects.
+- **Test timing.** The localhost end-to-end test asserted more than 10 heartbeats after a run that takes about 0.2 s on a fast machine; it now waits for them.
+- Follow-ups recorded, not done before the code freeze:
+  - a bounded client input channel;
+  - retiring old peer incarnations in the link;
+  - logging version and decode errors in `resource_sample`;
+  - `rm-ctl` reporting `ok` only when an injection actually starts;
+  - logging `reply` only when it was sent;
+  - resolving peer addresses at start;
+  - a failing exit code after a core panic;
+  - tests for `rm-ctl`.
