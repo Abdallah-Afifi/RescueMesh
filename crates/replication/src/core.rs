@@ -230,6 +230,17 @@ pub struct Core {
     out: Vec<Action>,
 }
 
+/// Objects whose version the read-set check compares (invariant I3):
+/// resources, and incidents, so two plans cannot both assign one waiting
+/// incident (design log DL-057). Both are keyed by the creating `ReqId`.
+fn versioned_ids(writes: &[Write]) -> impl Iterator<Item = ReqId> + '_ {
+    writes.iter().filter_map(|w| match w {
+        Write::PutResource(r) => Some(r.id),
+        Write::PutIncident(i) => Some(i.id),
+        Write::PutAssignment(_) => None,
+    })
+}
+
 fn peers_of(id: NodeId) -> impl Iterator<Item = NodeId> {
     NodeId::ALL.into_iter().filter(move |&n| n != id)
 }
@@ -722,10 +733,8 @@ impl Core {
             match &e.kind {
                 EntryKind::Result { req, writes, .. } => {
                     req_index.insert(*req, e.seq.0);
-                    for w in writes {
-                        if let Write::PutResource(r) = w {
-                            versions.insert(r.id, Version(e.seq.0));
-                        }
+                    for id in versioned_ids(writes) {
+                        versions.insert(id, Version(e.seq.0));
                     }
                 }
                 EntryKind::Inject { .. } => inject_k += 1,
@@ -861,10 +870,8 @@ impl Core {
         match &entry.kind {
             EntryKind::Result { req, writes, .. } => {
                 l.req_index.insert(*req, seq);
-                for w in writes {
-                    if let Write::PutResource(r) = w {
-                        l.versions.insert(r.id, Version(seq));
-                    }
+                for id in versioned_ids(writes) {
+                    l.versions.insert(id, Version(seq));
                 }
             }
             EntryKind::View(v) => {

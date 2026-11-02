@@ -419,6 +419,7 @@ impl Sim {
                 priority: i64::from(available),
                 assignments: vec![],
                 route: vec![ZoneId(u16::from(n.0))],
+                responders: vec![],
             }),
         }
     }

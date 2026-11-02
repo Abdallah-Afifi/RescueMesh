@@ -15,12 +15,18 @@ use crate::msg::{ClientReq, LoadSample, NodeMsg};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Committed state at one log position. `BTreeMap` everywhere so iteration
-/// order is identical on every machine.
+/// Committed state at one log position, as planning needs it. `BTreeMap`
+/// everywhere so iteration order is identical on every machine.
+///
+/// Holds every resource but only the incidents still `Open`, each with the
+/// version the coordinator compares (DL-057, DL-058). Planning never reads
+/// assigned or resolved incidents or assignments; leaving them out keeps the
+/// copy each commit makes small. Full state is answered by
+/// [`StateMachine::query`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub applied: Seq,
-    pub incidents: BTreeMap<IncidentId, Incident>,
+    pub incidents: BTreeMap<IncidentId, (Incident, Version)>,
     pub resources: BTreeMap<ResourceId, (ResourceOffer, Version)>,
     pub assignments: BTreeMap<(IncidentId, ResourceId), Assignment>,
 }
@@ -28,7 +34,10 @@ pub struct Snapshot {
 /// What the planner returns for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanOutput {
-    /// Every resource the computation looked at, with the version it saw.
+    /// Every incident and resource the plan writes, with the version it saw.
+    /// The coordinator rejects the plan if any has changed (I3). Objects the
+    /// plan only considered are left out: a change to them can make the plan
+    /// less than optimal but never invalid (DL-057).
     pub read_set: Vec<(ResourceId, Version)>,
     pub writes: Vec<Write>,
     pub result: OpResult,

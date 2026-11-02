@@ -34,7 +34,7 @@ use proto::{
 use replication::{Action as CoreAction, Core, CoreCfg};
 use selection::{Action as SelAction, RowState, Selector};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// One request to plan, from a fresh snapshot of committed state.
@@ -90,7 +90,15 @@ struct Executing {
     attempt: u32,
     /// The result sent to the coordinator, once planned.
     proposed: Option<OpResult>,
+    /// After a `Stale` rejection: plan again once this node has applied the
+    /// log up to the coordinator's position at rejection, or at the deadline
+    /// (ms), whichever comes first.
+    replan_at: Option<(proto::Seq, u64)>,
 }
+
+/// Longest wait for the log to catch up before re-planning anyway, in case
+/// the entries that made the plan stale are never committed.
+const REPLAN_WAIT_MS: u64 = 500;
 
 /// The core task of one cloud node.
 pub struct NodeTask {
@@ -100,6 +108,9 @@ pub struct NodeTask {
     state: Box<dyn StateMachine>,
     pool: Box<dyn PlanPool>,
     executing: BTreeMap<ReqId, Executing>,
+    /// Requests committed with this node as executor whose entry is not yet
+    /// applied here; the client is answered when it is (DL-061).
+    reply_when_applied: BTreeSet<ReqId>,
     incarnation: u32,
     heartbeat_n: u64,
     /// Last heartbeat accepted from each peer: (incarnation, number).
@@ -158,6 +169,7 @@ impl NodeTask {
             state,
             pool,
             executing: BTreeMap::new(),
+            reply_when_applied: BTreeSet::new(),
             incarnation,
             heartbeat_n: 0,
             last_heartbeat: BTreeMap::new(),
@@ -341,16 +353,23 @@ impl NodeTask {
                 CoreAction::Apply(entry) => {
                     self.state.apply(&entry);
                     if let EntryKind::Result { req, result, .. } = &entry.kind {
+                        if self.reply_when_applied.remove(req) {
+                            self.out.push(Out::Reply {
+                                req: *req,
+                                body: ReplyBody::Ok(result.clone()),
+                            });
+                        }
                         self.selector.on_committed(*req, entry.seq, result.clone());
                     }
                 }
-                CoreAction::ProposeDone { req, outcome } => self.proposal_done(req, outcome),
+                CoreAction::ProposeDone { req, outcome } => self.proposal_done(now, req, outcome),
                 CoreAction::SetSilenced(on) => self.out.push(Out::SetSilenced(on)),
                 CoreAction::Event { kind, req, fields } => {
                     self.out.push(Out::Event { kind, req, fields })
                 }
             }
         }
+        self.release_replans(now);
         // The view or this node's status may have changed.
         let s = self
             .selector
@@ -401,6 +420,7 @@ impl NodeTask {
                                 req,
                                 attempt: 0,
                                 proposed: None,
+                                replan_at: None,
                             },
                         );
                         self.pool.submit(job);
@@ -426,14 +446,57 @@ impl NodeTask {
         }
     }
 
-    fn proposal_done(&mut self, req: ReqId, outcome: ProposeOutcome) {
+    /// Sends re-plans whose wait is over to the pool. A deferred re-plan is
+    /// delayed, never dropped (rule: never drop an `Execute`).
+    fn release_replans(&mut self, now: u64) {
+        let applied = self.core.applied_seq();
+        let ready: Vec<ReqId> = self
+            .executing
+            .iter()
+            .filter(|(_, e)| {
+                e.replan_at
+                    .is_some_and(|(seq, at)| applied >= seq || now >= at)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        let snapshot = self.state.snapshot();
+        for id in ready {
+            if let Some(ex) = self.executing.get_mut(&id) {
+                ex.replan_at = None;
+                let job = PlanJob {
+                    req: ex.req.clone(),
+                    snapshot: snapshot.clone(),
+                    attempt: ex.attempt,
+                };
+                self.pool.submit(job);
+            }
+        }
+    }
+
+    fn proposal_done(&mut self, now: u64, req: ReqId, outcome: ProposeOutcome) {
         match outcome {
-            ProposeOutcome::Committed(_) => {
-                if let Some(result) = self.executing.remove(&req).and_then(|e| e.proposed) {
-                    self.out.push(Out::Reply {
-                        req,
-                        body: ReplyBody::Ok(result),
-                    });
+            // Answer with the committed entry, never this node's own copy: a
+            // late `Stale` for an earlier send can have replaced that copy with
+            // a newer plan while the older one committed (DL-061).
+            ProposeOutcome::Committed(seq) => {
+                if self.executing.remove(&req).is_some() {
+                    let applied = seq <= self.core.applied_seq();
+                    match self.core.entry(seq).map(|e| &e.kind) {
+                        Some(EntryKind::Result { req: r, result, .. }) if applied => {
+                            debug_assert_eq!(
+                                *r, req,
+                                "Committed must point at this request's entry"
+                            );
+                            let body = ReplyBody::Ok(result.clone());
+                            self.out.push(Out::Reply { req, body });
+                        }
+                        _ => {
+                            self.reply_when_applied.insert(req);
+                        }
+                    }
                 }
             }
             ProposeOutcome::Duplicate(result) => {
@@ -445,15 +508,16 @@ impl NodeTask {
             }
             ProposeOutcome::Stale { current } => {
                 if let Some(ex) = self.executing.get_mut(&req) {
+                    if ex.proposed.is_none() {
+                        return; // a late copy for a send already re-planned
+                    }
+                    // Re-planning at once would read the same stale snapshot
+                    // and be rejected again; wait until this node has applied
+                    // what the coordinator had when it rejected (DL-063).
                     ex.attempt += 1;
                     ex.proposed = None;
-                    let job = PlanJob {
-                        req: ex.req.clone(),
-                        snapshot: self.state.snapshot(),
-                        attempt: ex.attempt,
-                    };
+                    ex.replan_at = Some((current, now + REPLAN_WAIT_MS));
                     let attempt = ex.attempt;
-                    self.pool.submit(job);
                     self.event(
                         EventKind::Replan,
                         Some(req),

@@ -47,7 +47,7 @@ These are the properties the implementation must preserve and the tests must che
 
 - **I1. One result per request.** At most one `RESULT` entry is ever committed for a given `reqID`.
 - **I2. No lost commits.** An entry acknowledged to a client is held by a majority, so it survives any single silenced node.
-- **I3. No double assignment.** A committed plan's assignments were computed from the resource versions that are current at its `seq`.
+- **I3. No double assignment.** A committed plan's writes were computed from the versions current at its `seq`: its read set lists every incident and resource it writes, with the version it saw, and the coordinator rejects it if any has changed (DL-057).
 - **I4. One coordinator per epoch.** Entries and commands from an older epoch are rejected.
 - **I5. Only view members execute.** The coordinator commits a result only from an executor in its current view (DL-035). Selection ignores a `CLAIM` whose sender has not been in the view continuously since the `viewNo` the claim carries (DL-046).
 
@@ -92,7 +92,7 @@ Each node tracks every `reqID` it has seen:
 
 1. **Request.** The client middleware sends `REQ(reqID, payload, rtt[1..3], ackedUpTo)` to all three nodes.
 2. **Rank.** Each ACTIVE node ranks the members of its current view.
-3. **Claim.** The node that ranks itself first sends `CLAIM(reqID, viewNo, key)` to its peers, where `key = (quantised S, hash)`, and starts planning from a snapshot at its applied `seq`. It records the version of every resource it reads.
+3. **Claim.** The node that ranks itself first sends `CLAIM(reqID, viewNo, key)` to its peers, where `key = (quantised S, hash)`, and starts planning from a snapshot at its applied `seq`. It records the version of every incident and resource its plan writes (DL-057).
 4. **Claim timeout.** If a node sees no `CLAIM` within `T_c` from the node it ranked first, the next-ranked node claims. `T_c` is a few peer round trips and is unrelated to service time.
 5. **Competing claims.** If two claims for one `reqID` meet, the lower `key` wins and the other executor aborts if it has not yet proposed. If both propose, step 7 picks one.
 6. **Propose.** The executor sends `PROPOSE(reqID, epoch, viewNo, readSet, writes, plan)` to the coordinator. If the executor is the coordinator this is a local call.

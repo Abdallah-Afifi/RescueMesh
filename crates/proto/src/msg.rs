@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to these types. Receivers drop frames
 /// with a different version and log an error.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 // ---------------------------------------------------------------- client ↔ node
 

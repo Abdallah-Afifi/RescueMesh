@@ -19,5 +19,7 @@ pub mod link;
 pub mod net;
 pub mod runtime;
 pub mod task;
+pub mod workers;
 
 pub use task::{NodeTask, Out, PlanJob, PlanPool};
+pub use workers::{OnPlanned, WorkerPool};

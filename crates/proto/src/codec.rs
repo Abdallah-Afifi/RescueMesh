@@ -164,6 +164,7 @@ mod tests {
             priority: -17,
             assignments: vec![],
             route: vec![ZoneId(12), ZoneId(3)],
+            responders: vec![rid()],
         };
         let body = [
             NodeMsg::Ack,

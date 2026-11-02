@@ -155,7 +155,57 @@ pub fn plan(job: &PlanJob, executor: NodeId, resources: u32) -> PlanOutput {
             priority: i64::from(avail),
             assignments: vec![],
             route: vec![ZoneId(u16::from(executor.0))],
+            responders: vec![],
         }),
+    }
+}
+
+/// One offer per four requests, otherwise a report, varied by `seq`, so the
+/// real planner sees competing incidents and scarce responders.
+fn mixed_op(seq: u64) -> Op {
+    const KINDS: [ResourceKind; 4] = [
+        ResourceKind::Medic,
+        ResourceKind::Technician,
+        ResourceKind::Volunteer,
+        ResourceKind::Vehicle,
+    ];
+    const CATEGORIES: [Category; 4] = [
+        Category::MedicalAssistance,
+        Category::NetworkOutage,
+        Category::Flooding,
+        Category::BlockedRoad,
+    ];
+    if seq % 8 == 2 && seq >= 50 {
+        // The same user offered a resource 50 requests earlier (seq - 50 is a
+        // multiple of 4): change how many units it offers, sometimes to 0.
+        Op::UpdateResource {
+            resource: ReqId {
+                client: ClientId {
+                    machine: 1,
+                    process: 1,
+                    user: (seq % 50) as u32,
+                },
+                incarnation: 3,
+                seq: seq - 50,
+            },
+            available: (seq / 8 % 5) as u32,
+            extend_lease_ms: None,
+        }
+    } else if seq.is_multiple_of(4) {
+        Op::OfferResource {
+            kind: KINDS[(seq / 4 % 4) as usize],
+            capacity: 1 + (seq % 3) as u32,
+            zone: ZoneId((seq * 7 % 30) as u16),
+            lease_ms: 300_000,
+        }
+    } else {
+        Op::ReportIncident {
+            category: CATEGORIES[(seq % 4) as usize],
+            zone: ZoneId((seq * 11 % 30) as u16),
+            severity: Severity(1 + (seq % 5) as u8),
+            ttl_ms: 60_000,
+            attachment: None,
+        }
     }
 }
 
@@ -236,6 +286,9 @@ pub struct Sim {
     pub replies: BTreeMap<ReqId, Vec<(NodeId, ReplyBody)>>,
     pub submitted: BTreeSet<ReqId>,
     pub events: Vec<(u64, NodeId, proto::event::EventKind, Option<ReqId>)>,
+    /// When set, nodes run workstream D's real planner and state machine
+    /// instead of the fakes, and clients send a mix of offers and reports.
+    pub planner: Option<incident::IncidentPlanner>,
 }
 
 pub fn core_cfg(p: &Params) -> CoreCfg {
@@ -259,6 +312,15 @@ pub fn core_cfg(p: &Params) -> CoreCfg {
 
 impl Sim {
     pub fn new(params: Params) -> Sim {
+        Sim::build(params, None)
+    }
+
+    /// Nodes run the real incident planner and state machine.
+    pub fn with_real_planner(params: Params, planner: incident::IncidentPlanner) -> Sim {
+        Sim::build(params, Some(planner))
+    }
+
+    fn build(params: Params, planner: Option<incident::IncidentPlanner>) -> Sim {
         let nodes = NodeId::ALL
             .iter()
             .map(|&id| {
@@ -273,7 +335,11 @@ impl Sim {
                     ScoreCfg::default(),
                     &Timeouts::default(),
                     7,
-                    Box::new(FakeState::new()),
+                    if planner.is_some() {
+                        Box::new(incident::State::new())
+                    } else {
+                        Box::new(FakeState::new())
+                    },
                     Box::new(pool.clone()),
                 );
                 SimNode {
@@ -299,6 +365,7 @@ impl Sim {
             replies: BTreeMap::new(),
             submitted: BTreeSet::new(),
             events: Vec::new(),
+            planner,
         }
     }
 
@@ -371,12 +438,16 @@ impl Sim {
                     seq,
                 },
                 sent_at_ms: self.now,
-                op: Op::ReportIncident {
-                    category: Category::Flooding,
-                    zone: ZoneId(1),
-                    severity: Severity(3),
-                    ttl_ms: 60_000,
-                    attachment: None,
+                op: if self.planner.is_some() {
+                    mixed_op(seq)
+                } else {
+                    Op::ReportIncident {
+                        category: Category::Flooding,
+                        zone: ZoneId(1),
+                        severity: Severity(3),
+                        ttl_ms: 60_000,
+                        attachment: None,
+                    }
                 },
             },
             rtt_us: [Some(1_000); 3],
@@ -538,7 +609,16 @@ impl Sim {
             if cancelled {
                 continue;
             }
-            let out = plan(&job, n, self.params.resources);
+            let out = match &self.planner {
+                // The real pool refuses past the re-plan cap without planning.
+                Some(_) if job.attempt > MAX_REPLANS => PlanOutput {
+                    read_set: vec![],
+                    writes: vec![],
+                    result: OpResult::Refused("resources kept changing".into()),
+                },
+                Some(p) => proto::Planner::plan(p, &job.snapshot, &job.req.req),
+                None => plan(&job, n, self.params.resources),
+            };
             let o = self.nodes[n.index()]
                 .task
                 .on_planned(now, job.req.req.id, out);
