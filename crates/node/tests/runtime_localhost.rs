@@ -6,6 +6,7 @@
 //!
 //! These take a few seconds each because they run in real time.
 
+use client::EventLog;
 use node::dev::{DevPool, DevState};
 use node::runtime::{self, Node, NodeOpts};
 use proto::codec::{self, WireFormat};
@@ -216,11 +217,20 @@ fn three_nodes_elect_a_coordinator_and_answer_clients_over_real_sockets() {
         let (from, _) = c.call(&req, Duration::from_millis(500), Duration::from_secs(5));
         executors.insert(from);
     }
-    // Every node has heard the others' heartbeats, and the links carried
-    // and acknowledged messages.
+    // Every node hears the others' heartbeats (wait for them: on a fast
+    // machine the requests above finish in well under a second, and
+    // heartbeats go out every 100 ms), and the links carried and
+    // acknowledged messages.
+    wait_until("heartbeats flowing", Duration::from_secs(5), || {
+        nodes.iter().all(|n| {
+            n.net
+                .stats()
+                .heartbeats_rx
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 10
+        })
+    });
     for n in &nodes {
-        let s = n.net.stats();
-        assert!(s.heartbeats_rx.load(std::sync::atomic::Ordering::Relaxed) > 10);
         let l = n.net.link_stats();
         assert!(l.sent_new > 0 && l.delivered > 0, "{l:?}");
     }
@@ -365,4 +375,68 @@ fn no_false_suspicion_while_planning_saturates_every_core() {
         assert_eq!(field(&n.status(), "active"), "[1,2,3]");
     }
     eprintln!("{sent} requests sent; executing per node {queued:?}");
+}
+
+#[test]
+fn a_node_waking_from_a_silence_does_not_suspect_its_peers() {
+    // Regression test: the heartbeat thread used to run its detectors
+    // before restarting them when a silence ended during its receive wait,
+    // so the woken node suspected both peers every time (DL-064).
+    let cfg = config(4);
+    let dir = std::env::temp_dir().join(format!("rm-wake-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let logs: Vec<_> = NodeId::ALL
+        .iter()
+        .map(|&id| {
+            EventLog::create(&dir, "wake", &format!("cloud{}", id.0), "node", Some(id)).unwrap()
+        })
+        .collect();
+    let nodes: Vec<Node> = NodeId::ALL
+        .iter()
+        .map(|&id| {
+            let opts = NodeOpts::new(
+                id,
+                cfg.clone(),
+                0x2000 + u32::from(id.0),
+                Some(logs[id.index()].clone()),
+            );
+            let pool = DevPool::factory(2, cfg.planner.queue_capacity, 3, 0);
+            runtime::start(opts, Box::new(DevState::new()), pool).expect("node starts")
+        })
+        .collect();
+    wait_until("settled", Duration::from_secs(10), || {
+        settled(&nodes, "[1,2,3]")
+    });
+    let coord: u8 = field(&nodes[0].status(), "coordinator").parse().unwrap();
+    let victim = NodeId::ALL.into_iter().find(|n| n.0 != coord).unwrap();
+    let answer = operator(&cfg, NodeId(coord), &format!("silence {} 1500", victim.0));
+    assert!(answer.starts_with("ok"), "{answer}");
+    wait_until("victim silenced", Duration::from_secs(2), || {
+        field(&nodes[victim.index()].status(), "silenced") == "true"
+    });
+    wait_until("rejoined", Duration::from_secs(15), || {
+        settled(&nodes, "[1,2,3]") && field(&nodes[victim.index()].status(), "silenced") == "false"
+    });
+    thread::sleep(Duration::from_millis(500));
+    for l in &logs {
+        l.finish();
+    }
+    let text = std::fs::read_to_string(logs[victim.index()].path()).unwrap();
+    let kinds: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let woke = kinds
+        .iter()
+        .position(|e| e["kind"] == "inject_end")
+        .expect("the victim logged inject_end");
+    let suspicions: Vec<&serde_json::Value> = kinds[woke..]
+        .iter()
+        .filter(|e| e["kind"] == "suspect")
+        .collect();
+    assert!(
+        suspicions.is_empty(),
+        "the woken node suspected its peers: {suspicions:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

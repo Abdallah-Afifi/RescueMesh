@@ -190,7 +190,11 @@ fn run(
         }
 
         // ---- detect
-        if !net.is_silenced() {
+        // Use the value read at the top of the loop, not a fresh read: if the
+        // silence ended during the receive wait, the detectors have not been
+        // restarted yet and would compare against heartbeats from before the
+        // silence, suspecting every peer on wake (DL-064).
+        if !silenced {
             let now = clock.now_ms();
             for (&peer, p) in peers.iter_mut() {
                 if let Some(reading) = p.fd.check(now)

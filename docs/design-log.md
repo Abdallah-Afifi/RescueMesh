@@ -496,6 +496,7 @@ Entries DL-053 to DL-055 record decisions made while implementing workstream B (
 ## DL-054. Transport: threads, connections, preambles, acknowledgment
 
 - Date: 2026-11-01. Status: agreed. Owner: Hanna. Implements DL-014; changes the "asynchronous task per connection" part of DL-017.
+- Amends DL-014 in three ways, agreed at the integration review on 2026-11-02: two TCP connections per pair of nodes instead of one, retransmission with exponential backoff up to 1.6 s and bursts of at most 256 instead of a fixed `retransmit_ms`, and a cap of 4,096 unacknowledged bodies per peer. Above the cap the oldest bodies are dropped while the peer is still in the view; the replication core resends `Append`, `Propose` and `Join` and claims time out, so only a forwarded operator `Silence` can be lost.
 - Decisions:
   - **Threads, not async tasks.** The node uses OS threads with blocking `std::net` sockets: one acceptor, one reader per inbound connection, one writer per peer and per client connection, the heartbeat thread, the core thread and the planning threads. With three nodes and a few dozen client processes per run (DL-039) this is under two hundred threads, well within what an OS schedules easily, and blocking code is simpler to reason about and to test. The single core task owning all protocol state (DL-017) is unchanged. `tokio` remains in use on the client side.
   - **One port, three kinds of connection,** told apart by the first four bytes: `RMP1` plus a node-id byte for a peer, `RMO1` for the operator tool, anything else for a client. A client frame starts with a 4-byte length of at most 16 MiB, whose first byte is 0x00 or 0x01, never `R`, so clients need no preamble and `crates/client` is unchanged.
@@ -515,3 +516,19 @@ Entries DL-053 to DL-055 record decisions made while implementing workstream B (
 - Date: 2026-11-01. Status: temporary. Owner: Hanna (to be removed by Youssef).
 - Decision: `node::dev` holds a minimal `StateMachine` and planning pool so `rm-node` runs end to end now. The planner follows the contract (pure, deterministic, read set recorded, `Refused` after `max_replans`) but plans no assignments. `rm-node --dev-spin-us N` burns N µs of CPU per plan for load tests. The runtime takes the state machine and a pool factory as parameters (`runtime::start`, `PoolFactory`, `PlanSink`), so workstream D replaces both in `crates/node/src/main.rs` and nothing else changes.
 - Numbers measured with the placeholder are never reported.
+
+## DL-064. Runtime fixes from the integration review
+
+- Date: 2026-11-02. Status: agreed (integration review of workstream B).
+- **No false suspicion on waking.** The heartbeat thread re-read the silence flag in its detection step, after a receive wait of up to 5 ms. The silence usually ended during that wait, so the detectors ran before being restarted, against heartbeats from before the silence. The woken node suspected both peers after every injection (3 of 3 in the reviewer's probe). That inflated the false-suspicion count and delayed its `Join`. The detection step now uses the value read at the top of the loop. A regression test checks that the victim logs no `suspect` after `inject_end`; it fails on the previous code.
+- **Client connections are closed on every writer exit.** After a write error or the 5 s write timeout, the writer returned without shutting the socket. The node kept executing that client's requests but never answered them. Both directions are now shut down on every exit, so the client reconnects.
+- **Test timing.** The localhost end-to-end test asserted more than 10 heartbeats after a run that takes about 0.2 s on a fast machine; it now waits for them.
+- Follow-ups recorded, not done before the code freeze:
+  - a bounded client input channel;
+  - retiring old peer incarnations in the link;
+  - logging version and decode errors in `resource_sample`;
+  - `rm-ctl` reporting `ok` only when an injection actually starts;
+  - logging `reply` only when it was sent;
+  - resolving peer addresses at start;
+  - a failing exit code after a core panic;
+  - tests for `rm-ctl`.

@@ -589,7 +589,16 @@ pub fn parse_target(s: &str) -> Option<SilenceTarget> {
 
 fn client_writer(net: &Net, stream: TcpStream, rx: Receiver<ClientReply>) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let mut w = BufWriter::with_capacity(1 << 16, &stream);
+    write_replies(net, &stream, &rx);
+    // On every exit, including a write error or timeout, close both
+    // directions: the reader then sees the connection end and the client
+    // reconnects. Otherwise the node would keep executing this client's
+    // requests but never answer them again (DL-064).
+    let _ = stream.shutdown(Shutdown::Both);
+}
+
+fn write_replies(net: &Net, stream: &TcpStream, rx: &Receiver<ClientReply>) {
+    let mut w = BufWriter::with_capacity(1 << 16, stream);
     while let Ok(first) = rx.recv() {
         let mut next = Some(first);
         while let Some(reply) = next.take() {
@@ -608,7 +617,6 @@ fn client_writer(net: &Net, stream: TcpStream, rx: Receiver<ClientReply>) {
             return;
         }
     }
-    let _ = stream.shutdown(Shutdown::Both);
 }
 
 fn connect(addr: &str) -> io::Result<TcpStream> {
