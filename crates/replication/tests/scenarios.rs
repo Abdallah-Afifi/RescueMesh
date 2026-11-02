@@ -297,3 +297,39 @@ fn scheduled_injections_silence_one_node_at_a_time_and_it_recovers() {
     assert_eq!(sim.count_events(EventKind::InjectEnd), injections);
     assert!(sim.count_events(EventKind::SyncStart) >= injections);
 }
+
+#[test]
+fn two_plans_writing_one_incident_cannot_both_commit() {
+    // DL-054: incidents are versioned like resources, so a waiting incident
+    // assigned by one committed plan makes a concurrent plan for it stale.
+    use proto::{Category, Incident, IncidentStatus, OpResult, Severity, Version, Write, ZoneId};
+    let mut sim = started(4);
+    let incident = Incident {
+        id: request_id(900),
+        owner: request_id(900).client,
+        category: Category::Flooding,
+        zone: ZoneId(0),
+        severity: Severity(3),
+        reported_at_ms: 0,
+        status: IncidentStatus::Assigned,
+        ttl_ms: 60_000,
+        attachment: None,
+    };
+    let writing_incident = |sim: &Sim, n: NodeId, req| {
+        let mut p = sim.plan(n, req);
+        p.read_set = vec![(incident.id, Version(0))];
+        p.writes = vec![Write::PutIncident(incident.clone())];
+        p.result = OpResult::Accepted;
+        p
+    };
+    let (a, b) = (request_id(1), request_id(2));
+    let first = writing_incident(&sim, N1, a);
+    let second = writing_incident(&sim, N2, b);
+    sim.propose_raw(N1, first);
+    sim.run_until(1_000, "first committed", |s| {
+        last_outcome(s, N1, a).is_some_and(|o| matches!(o, ProposeOutcome::Committed(_)))
+    });
+    sim.propose_raw(N2, second);
+    sim.run_until(1_000, "second answered", |s| s.replies.contains_key(&b));
+    assert!(matches!(sim.replies[&b][0].1, ProposeOutcome::Stale { .. }));
+}

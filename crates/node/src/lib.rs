@@ -4,5 +4,7 @@
 //! (workstream D).
 
 pub mod task;
+pub mod workers;
 
 pub use task::{NodeTask, Out, PlanJob, PlanPool};
+pub use workers::{OnPlanned, WorkerPool};

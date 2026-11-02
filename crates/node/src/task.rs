@@ -34,7 +34,7 @@ use proto::{
 use replication::{Action as CoreAction, Core, CoreCfg};
 use selection::{Action as SelAction, RowState, Selector};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// One request to plan, from a fresh snapshot of committed state.
@@ -100,6 +100,9 @@ pub struct NodeTask {
     state: Box<dyn StateMachine>,
     pool: Box<dyn PlanPool>,
     executing: BTreeMap<ReqId, Executing>,
+    /// Requests committed with this node as executor whose entry is not yet
+    /// applied here; the client is answered when it is (DL-058).
+    reply_when_applied: BTreeSet<ReqId>,
     incarnation: u32,
     heartbeat_n: u64,
     /// Last heartbeat accepted from each peer: (incarnation, number).
@@ -158,6 +161,7 @@ impl NodeTask {
             state,
             pool,
             executing: BTreeMap::new(),
+            reply_when_applied: BTreeSet::new(),
             incarnation,
             heartbeat_n: 0,
             last_heartbeat: BTreeMap::new(),
@@ -341,6 +345,12 @@ impl NodeTask {
                 CoreAction::Apply(entry) => {
                     self.state.apply(&entry);
                     if let EntryKind::Result { req, result, .. } = &entry.kind {
+                        if self.reply_when_applied.remove(req) {
+                            self.out.push(Out::Reply {
+                                req: *req,
+                                body: ReplyBody::Ok(result.clone()),
+                            });
+                        }
                         self.selector.on_committed(*req, entry.seq, result.clone());
                     }
                 }
@@ -428,12 +438,21 @@ impl NodeTask {
 
     fn proposal_done(&mut self, req: ReqId, outcome: ProposeOutcome) {
         match outcome {
-            ProposeOutcome::Committed(_) => {
-                if let Some(result) = self.executing.remove(&req).and_then(|e| e.proposed) {
-                    self.out.push(Out::Reply {
-                        req,
-                        body: ReplyBody::Ok(result),
-                    });
+            // Answer with the committed entry, never this node's own copy: a
+            // late `Stale` for an earlier send can have replaced that copy with
+            // a newer plan while the older one committed (DL-058).
+            ProposeOutcome::Committed(seq) => {
+                if self.executing.remove(&req).is_some() {
+                    let applied = seq <= self.core.applied_seq();
+                    match self.core.entry(seq).map(|e| &e.kind) {
+                        Some(EntryKind::Result { result, .. }) if applied => {
+                            let body = ReplyBody::Ok(result.clone());
+                            self.out.push(Out::Reply { req, body });
+                        }
+                        _ => {
+                            self.reply_when_applied.insert(req);
+                        }
+                    }
                 }
             }
             ProposeOutcome::Duplicate(result) => {

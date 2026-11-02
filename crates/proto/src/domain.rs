@@ -140,6 +140,10 @@ pub struct Plan {
     pub assignments: Vec<Assignment>,
     /// Recommended sequence of zones for the first assigned responder.
     pub route: Vec<ZoneId>,
+    /// Prioritized responder list (spec p. 3): capable resources, best first,
+    /// ranked by the total dispatch cost if the incident were given each one.
+    /// The substitutes if the assigned responder cannot go (DL-056).
+    pub responders: Vec<ResourceId>,
 }
 
 /// A state change carried by a committed `Result` entry.

@@ -185,6 +185,10 @@ fn a_retry_of_a_committed_request_is_answered_with_the_same_result() {
 }
 
 fn chaos(seed: u64, ms: u64) -> Sim {
+    chaos_with(seed, ms, None)
+}
+
+fn chaos_with(seed: u64, ms: u64, planner: Option<incident::IncidentPlanner>) -> Sim {
     let mut r = SplitMix64::new(seed ^ 0xc0de);
     let params = Params {
         seed,
@@ -204,7 +208,10 @@ fn chaos(seed: u64, ms: u64) -> Sim {
             duration_max_ms: 3_000,
         }),
     };
-    let mut sim = Sim::new(params);
+    let mut sim = match planner {
+        Some(p) => Sim::with_real_planner(params, p),
+        None => Sim::new(params),
+    };
     sim.workload = true;
     let mut until = [0u64; 3];
     let end = sim.now + ms;
@@ -239,5 +246,75 @@ fn under_faults_and_overload_every_request_gets_one_consistent_answer() {
         let mut sim = chaos(seed, 25_000);
         sim.settle();
         assert!(sim.submitted.len() > 1_000, "seed {seed}");
+    }
+}
+
+/// Workstream D under the same faults: the real planner and state machine on
+/// all three nodes, with competing incidents and scarce responders. Rebuilds
+/// the state from the committed log and checks no responder ever gave out
+/// more units than it had, and no incident got two responders.
+#[test]
+fn the_real_planner_keeps_assignments_consistent_under_faults() {
+    use incident::State;
+    use proto::{EntryKind, StateMachine, Write};
+    use std::collections::BTreeMap;
+    let seeds = std::env::var("SIM_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2u64);
+    for seed in 0..seeds {
+        let mut sim = chaos_with(seed, 15_000, Some(incident::IncidentPlanner::new(30, 20)));
+        sim.settle();
+        assert!(sim.submitted.len() > 500, "seed {seed}");
+        // Nodes may learn the final commit position at different times, so
+        // compare the common committed prefix and audit the longest log.
+        let logs: Vec<_> = NodeId::ALL.iter().map(|&n| sim.committed(n)).collect();
+        let log = logs.iter().max_by_key(|l| l.len()).unwrap().clone();
+        for l in &logs {
+            assert_eq!(
+                l[..],
+                log[..l.len()],
+                "seed {seed}: committed logs disagree"
+            );
+        }
+        let mut state = State::new();
+        let mut capacity = BTreeMap::new();
+        let mut assigned = 0;
+        for e in &log {
+            if let EntryKind::Result { writes, .. } = &e.kind {
+                for w in writes {
+                    match w {
+                        Write::PutResource(r) => {
+                            capacity.insert(r.id, r.capacity);
+                        }
+                        Write::PutAssignment(_) => assigned += 1,
+                        Write::PutIncident(_) => {}
+                    }
+                }
+            }
+            state.apply(e);
+        }
+        assert!(
+            assigned > 50,
+            "seed {seed}: the workload must exercise assignment"
+        );
+        let snap = state.snapshot();
+        let mut given: BTreeMap<proto::ReqId, u32> = BTreeMap::new();
+        let mut per_incident: BTreeMap<proto::ReqId, u32> = BTreeMap::new();
+        for a in state.assignments().values() {
+            *given.entry(a.resource).or_default() += a.units;
+            *per_incident.entry(a.incident).or_default() += 1;
+        }
+        for (id, (r, _)) in &snap.resources {
+            assert_eq!(
+                given.get(id).copied().unwrap_or(0) + r.available,
+                capacity[id],
+                "seed {seed}"
+            );
+        }
+        assert!(
+            per_incident.values().all(|&c| c == 1),
+            "seed {seed}: an incident got two responders"
+        );
     }
 }
