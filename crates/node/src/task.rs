@@ -261,8 +261,25 @@ impl NodeTask {
         self.take()
     }
 
-    /// The pool finished planning `req`.
-    pub fn on_planned(&mut self, now: u64, req: ReqId, plan: PlanOutput) -> Vec<Out> {
+    /// The pool finished planning `req`, spending `service_us` on it. Logs
+    /// the `plan_end` event the analysis computes per-node busy time and
+    /// load distribution from (protocol Section 10), whether or not the
+    /// request was aborted meanwhile: the work was done either way.
+    pub fn on_planned(
+        &mut self,
+        now: u64,
+        req: ReqId,
+        plan: PlanOutput,
+        service_us: u32,
+    ) -> Vec<Out> {
+        self.event(
+            EventKind::PlanEnd,
+            Some(req),
+            &[
+                ("service_us", service_us.into()),
+                ("read_set_len", plan.read_set.len().into()),
+            ],
+        );
         let Some(ex) = self.executing.get_mut(&req) else {
             return self.take(); // aborted while it was being planned
         };

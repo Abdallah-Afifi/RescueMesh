@@ -19,7 +19,9 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Called on a planning thread with each finished plan. The runtime forwards
 /// it to [`crate::NodeTask::on_planned`].
-pub type OnPlanned = Arc<dyn Fn(ReqId, PlanOutput) + Send + Sync>;
+/// Arguments: the request, its plan, and the time spent planning it in
+/// microseconds (0 when it was refused without planning).
+pub type OnPlanned = Arc<dyn Fn(ReqId, PlanOutput, u32) + Send + Sync>;
 
 /// Weight of the newest sample in the service-time average, as 1/N.
 const EWMA_N: u32 = 8;
@@ -50,7 +52,8 @@ impl WorkerPool {
     /// `timeouts.max_replans`.
     pub fn new(cfg: &Config, planner: Arc<dyn Planner>, on_planned: OnPlanned) -> WorkerPool {
         let threads = cfg.planner.worker_threads.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1))
+            // Never 0: a pool with no threads would strand every claimed request.
+            std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1))
         });
         WorkerPool::with_parts(
             threads,
@@ -95,7 +98,7 @@ impl WorkerPool {
 fn work(
     shared: &Shared,
     planner: &dyn Planner,
-    done: &(dyn Fn(ReqId, PlanOutput) + Send + Sync),
+    done: &(dyn Fn(ReqId, PlanOutput, u32) + Send + Sync),
     max_replans: u32,
 ) {
     loop {
@@ -110,13 +113,14 @@ fn work(
             j.running += 1;
             j.queue.pop_front().expect("queue is not empty")
         };
-        let out = if job.attempt > max_replans {
+        let (out, took) = if job.attempt > max_replans {
             // Re-planning gave up: commit a refusal so retries get an answer.
-            PlanOutput {
+            let refused = PlanOutput {
                 read_set: vec![],
                 writes: vec![],
                 result: OpResult::Refused("resources kept changing; please retry".into()),
-            }
+            };
+            (refused, 0)
         } else {
             let started = Instant::now();
             // A planner panic must not kill the worker and strand a claimed
@@ -140,14 +144,14 @@ fn work(
                             old - old / EWMA_N + took / EWMA_N
                         })
                     });
-            out
+            (out, took)
         };
         shared
             .jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .running -= 1;
-        done(job.req.req.id, out);
+        done(job.req.req.id, out, took);
     }
 }
 
@@ -310,7 +314,7 @@ mod tests {
     ) -> (WorkerPool, mpsc::Receiver<(ReqId, PlanOutput)>) {
         let (tx, rx) = mpsc::channel();
         let tx = Mutex::new(tx);
-        let done: OnPlanned = Arc::new(move |r, o| {
+        let done: OnPlanned = Arc::new(move |r, o, _| {
             let _ = tx.lock().unwrap().send((r, o));
         });
         (

@@ -621,7 +621,7 @@ impl Sim {
             };
             let o = self.nodes[n.index()]
                 .task
-                .on_planned(now, job.req.req.id, out);
+                .on_planned(now, job.req.req.id, out, 1_000);
             self.process(n, o);
         }
     }

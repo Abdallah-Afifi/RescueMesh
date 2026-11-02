@@ -98,6 +98,8 @@ pub enum Input {
     Planned {
         req: ReqId,
         plan: PlanOutput,
+        /// Time spent planning, microseconds.
+        service_us: u32,
     },
     Operator(OpCmd),
 }

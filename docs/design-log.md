@@ -633,3 +633,14 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
   - resolving peer addresses at start;
   - a failing exit code after a core panic;
   - tests for `rm-ctl`.
+
+## DL-065. Integration of workstreams B and D in `rm-node`
+
+- Date: 2026-11-02. Status: agreed. Owner: Abdallah (integration).
+- Decisions:
+  - `rm-node` runs workstream D's state machine (`incident::State`), planner (`IncidentPlanner`) and worker pool (`WorkerPool`) on workstream B's runtime. Finished plans reach the core task through B's `PlanSink`. B's placeholder pool is kept for stress tests only, behind `--dev-spin-us`; the startup line names the planner in use.
+  - The pool reports each plan's service time with the result. The core task logs it as `plan_end` (`service_us`, `read_set_len`), which the analysis needs for per-node busy time and Jain's index.
+  - `inject_end` carries the injection number `k`, as the event schema says; the analysis matches it to its `inject_start` and no longer fails when `k` is missing.
+  - The pool never starts with 0 planning threads, which would strand every claimed request on a one-core machine.
+- First end-to-end run on one machine (3 nodes, real load generator, 300 requests/s open loop, coordinator silenced for 5 s): 9,002 requests, none lost. p50 4 ms, p99 49 ms. The silenced coordinator was removed from the view after 0.37 s and back in it 0.09 s after waking. Jain's index over busy time 0.986. All three nodes ended with identical logs.
+- Open: the failover-time metric read 1.0 s and 6.5 s in two runs of the same scenario, while the other failure measures barely moved; its in-band threshold needs checking against real baselines before the experiments are reported.

@@ -203,6 +203,8 @@ def window_p99(t: np.ndarray, lat: np.ndarray, lo: float, hi: float, w: float) -
 
 def first_by_k(df: pd.DataFrame, victim_col="node") -> pd.DataFrame:
     """One row per injection k, preferring the victim's own event."""
+    if df.empty or "k" not in df or df.k.isna().all():
+        return df.iloc[0:0]  # no usable injection numbers: nothing to match
     rows = []
     for k, g in df.groupby("k"):
         mine = g[g.node == g.victim] if "victim" in g and g.victim.notna().any() else g.iloc[0:0]

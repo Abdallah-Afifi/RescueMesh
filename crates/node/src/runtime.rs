@@ -41,8 +41,12 @@ pub struct PlanSink(Sender<Input>);
 impl PlanSink {
     /// A finished plan for `req`. Results of cancelled jobs may still be
     /// delivered; the core task ignores them.
-    pub fn done(&self, req: ReqId, plan: PlanOutput) {
-        let _ = self.0.send(Input::Planned { req, plan });
+    pub fn done(&self, req: ReqId, plan: PlanOutput, service_us: u32) {
+        let _ = self.0.send(Input::Planned {
+            req,
+            plan,
+            service_us,
+        });
     }
 }
 
@@ -216,7 +220,11 @@ impl Core {
                 self.task.set_suspected(now, peer, reading.suspected),
                 Some(reading),
             ),
-            Input::Planned { req, plan } => (self.task.on_planned(now, req, plan), None),
+            Input::Planned {
+                req,
+                plan,
+                service_us,
+            } => (self.task.on_planned(now, req, plan, service_us), None),
             Input::Operator(OpCmd::Status(reply)) => {
                 let _ = reply.send(self.status_line());
                 return;

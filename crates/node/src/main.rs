@@ -12,12 +12,16 @@
 
 use clap::Parser;
 use client::EventLog;
-use node::dev::{DevPool, DevState};
-use node::runtime::{self, NodeOpts};
+use incident::{IncidentPlanner, State};
+use node::dev::DevPool;
+use node::runtime::{self, NodeOpts, PlanSink, PoolFactory};
+use node::{PlanPool, WorkerPool};
 use proto::NodeId;
+use proto::Planner;
 use proto::config::Config;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(about = "RescueMesh cloud node")]
@@ -28,7 +32,10 @@ struct Args {
     /// This node's id: 1, 2 or 3.
     #[arg(long)]
     id: u8,
-    /// Placeholder planner only: busy CPU time per plan, microseconds.
+    /// Run the placeholder planner instead of the incident service, burning
+    /// this many microseconds of CPU per plan. For stress-testing the runtime
+    /// only; never report numbers measured this way. 0 (default): the real
+    /// planner.
     #[arg(long, default_value_t = 0)]
     dev_spin_us: u64,
 }
@@ -78,20 +85,36 @@ fn main() -> ExitCode {
             .map(|n| n.get().saturating_sub(1).max(1))
             .unwrap_or(1)
     });
-    let pool = DevPool::factory(
-        threads,
-        cfg.planner.queue_capacity,
-        cfg.timeouts.max_replans,
-        args.dev_spin_us,
-    );
+    let (capacity, max_replans) = (cfg.planner.queue_capacity, cfg.timeouts.max_replans);
+    let (pool, planner_name): (PoolFactory, &str) = if args.dev_spin_us > 0 {
+        (
+            DevPool::factory(threads, capacity, max_replans, args.dev_spin_us),
+            "placeholder",
+        )
+    } else {
+        // Workstream D's planner on workstream D's worker pool; finished plans
+        // go back to the core task through the runtime's sink (DL-065).
+        let planner: Arc<dyn Planner> = Arc::new(IncidentPlanner::from_config(&cfg));
+        let factory: PoolFactory = Box::new(move |sink: PlanSink| {
+            let on_planned = Arc::new(move |req, plan, us| sink.done(req, plan, us));
+            Box::new(WorkerPool::with_parts(
+                threads,
+                capacity,
+                max_replans,
+                planner,
+                on_planned,
+            )) as Box<dyn PlanPool>
+        });
+        (factory, "incident")
+    };
     let inc = incarnation();
     eprintln!(
         "{id}: run {} on {}:{} (heartbeats on udp {}), policy {:?}, incarnation {inc:08x}, \
-         {threads} planning threads",
+         {threads} planning threads, {planner_name} planner",
         cfg.run.run_id, me.host, me.port, me.heartbeat_port, cfg.policy.ranker
     );
     let opts = NodeOpts::new(id, cfg, inc, Some(log.clone()));
-    match runtime::start(opts, Box::new(DevState::new()), pool) {
+    match runtime::start(opts, Box::new(State::new()), pool) {
         Ok(node) => node.join(),
         Err(e) => {
             eprintln!("{id}: cannot start: {e}");

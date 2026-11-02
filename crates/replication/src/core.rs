@@ -222,6 +222,8 @@ pub struct Core {
 
     suspected: [bool; 3],
     silenced_until: Option<u64>,
+    /// Injection counter of the current silence, for the `inject_end` event.
+    silence_k: Option<u64>,
     rank1_hint: Option<NodeId>,
     inject_paused: bool,
 
@@ -283,6 +285,7 @@ impl Core {
             last_join_sent: None,
             suspected: [false; 3],
             silenced_until: None,
+            silence_k: None,
             rank1_hint: None,
             inject_paused: false,
             outstanding: BTreeMap::new(),
@@ -1235,6 +1238,7 @@ impl Core {
                 } => {
                     if *victim == self.id && self.silenced_until.is_none() {
                         self.silenced_until = Some(now + duration_ms);
+                        self.silence_k = Some(*k);
                         self.event(
                             EventKind::InjectStart,
                             None,
@@ -1359,7 +1363,9 @@ impl Core {
     fn wake(&mut self, now: u64) {
         self.silenced_until = None;
         self.out.push(Action::SetSilenced(false));
-        self.event(EventKind::InjectEnd, None, &[]);
+        // `k` matches the event to its `inject_start` (event schema, DL-028).
+        let k = self.silence_k.take();
+        self.event(EventKind::InjectEnd, None, &[("k", k.into())]);
         if self.role == Role::Coordinator {
             self.step_down(now, "woke from silence");
         }

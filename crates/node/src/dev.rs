@@ -1,6 +1,7 @@
-//! **Placeholder** state machine and planning pool, so `rm-node` runs end to
-//! end before workstream D's incident service is merged. Replace both in
-//! `main.rs` with D's implementations; nothing else depends on this module.
+//! **Placeholder** planning pool, used by the runtime's localhost tests. It
+//! burns a chosen amount of CPU per job (`spin_us`), which is how the
+//! false-suspicion test saturates a node's cores. `rm-node` itself runs
+//! workstream D's real planner and pool (design log DL-065).
 //!
 //! The planner here is trivial (it stores what it is given and plans no
 //! assignments) but it follows the contract: deterministic, pure, records
@@ -13,8 +14,8 @@
 use crate::runtime::{PlanSink, PoolFactory};
 use crate::task::{PlanJob, PlanPool};
 use proto::{
-    Entry, EntryKind, Incident, IncidentStatus, LoadSample, Op, OpResult, Plan, PlanOutput, Query,
-    ReqId, Request, ResourceId, ResourceOffer, Seq, Snapshot, StateMachine, Version, Write,
+    Incident, IncidentStatus, LoadSample, Op, OpResult, Plan, PlanOutput, ReqId, ResourceOffer,
+    Snapshot, Write,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -23,66 +24,9 @@ use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------- state machine
 
-#[derive(Default)]
-pub struct DevState {
-    snap: Arc<Snapshot>,
-}
-
-impl DevState {
-    pub fn new() -> DevState {
-        DevState::default()
-    }
-}
-
-impl StateMachine for DevState {
-    fn apply(&mut self, entry: &Entry) {
-        let s = Arc::make_mut(&mut self.snap);
-        s.applied = entry.seq;
-        if let EntryKind::Result { writes, .. } = &entry.kind {
-            for w in writes {
-                match w {
-                    Write::PutIncident(i) => {
-                        s.incidents.insert(i.id, i.clone());
-                    }
-                    Write::PutResource(r) => {
-                        s.resources.insert(r.id, (r.clone(), Version(entry.seq.0)));
-                    }
-                    Write::PutAssignment(a) => {
-                        s.assignments.insert((a.incident, a.resource), a.clone());
-                    }
-                }
-            }
-        }
-    }
-    fn snapshot(&self) -> Arc<Snapshot> {
-        self.snap.clone()
-    }
-    fn version_of(&self, r: ResourceId) -> Option<Version> {
-        self.snap.resources.get(&r).map(|(_, v)| *v)
-    }
-    fn applied(&self) -> Seq {
-        self.snap.applied
-    }
-    fn query(&self, req: &Request) -> OpResult {
-        match &req.op {
-            Op::Query(Query::Incident(id)) => {
-                OpResult::Incident(self.snap.incidents.get(id).cloned())
-            }
-            Op::Query(Query::IncidentsInZone(z)) => OpResult::Incidents(
-                self.snap
-                    .incidents
-                    .values()
-                    .filter(|i| i.zone == *z)
-                    .cloned()
-                    .collect(),
-            ),
-            Op::Query(Query::Resource(id)) => {
-                OpResult::Resource(self.snap.resources.get(id).map(|(r, _)| r.clone()))
-            }
-            _ => OpResult::Refused("not a query".into()),
-        }
-    }
-}
+/// Since workstream D was merged, the placeholder pool runs on D's real state
+/// machine; only the planning stays a placeholder.
+pub type DevState = incident::State;
 
 /// The placeholder planner: a pure function of the snapshot and the job.
 pub fn plan(snap: &Snapshot, job: &PlanJob, max_replans: u32) -> PlanOutput {
@@ -120,6 +64,7 @@ pub fn plan(snap: &Snapshot, job: &PlanJob, max_replans: u32) -> PlanOutput {
                 priority: i64::from(severity.0),
                 assignments: vec![],
                 route: vec![*zone],
+                responders: vec![],
             }),
         },
         Op::OfferResource {
@@ -222,7 +167,7 @@ fn worker(q: &(Mutex<Queue>, Condvar), sink: &PlanSink, max_replans: u32, spin_u
                 ((u64::from(g.ewma_us) * 7 + u64::from(us)) / 8) as u32
             };
         }
-        sink.done(job.req.req.id, out);
+        sink.done(job.req.req.id, out, us);
     }
 }
 

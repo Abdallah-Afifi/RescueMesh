@@ -24,8 +24,7 @@ loadgen.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 sysinfo.workspace = true
-
-[dev-dependencies]
+# Workstream D: the real state machine and planner rm-node runs.
 incident.workspace = true
 
 [lints]
