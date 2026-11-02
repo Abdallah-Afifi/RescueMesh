@@ -343,7 +343,7 @@ Entries DL-030 to DL-037 record decisions made while implementing workstream A (
 
 ## DL-038. Executor selection: details settled while implementing workstream C
 
-- Date: 2026-10-21. Status: proposed (C), for review by B.
+- Date: 2026-10-21. Status: agreed (integration review, 2026-11-02) (C), for review by B.
 - Context: `crates/selection` implements protocol Section 5 and the baselines of Section 10. The protocol leaves the following points open; each is decided here.
 - Decisions:
   - **Unknown client RTT.** Until the client has measured its round trip to a node, the RTT term for that node is the cap (1000 thousandths). A node the client has never heard back from ranks as the furthest away. When no RTT is known for any node, the term is equal for all and has no effect.
@@ -513,7 +513,7 @@ Entries DL-053 to DL-055 record decisions made while implementing workstream B (
 
 ## DL-055. A placeholder planner until the incident service is merged
 
-- Date: 2026-11-01. Status: temporary. Owner: Hanna (to be removed by Youssef).
+- Date: 2026-11-01. Status: superseded by DL-065 (the placeholder is kept for runtime stress tests only). Owner: Hanna (to be removed by Youssef).
 - Decision: `node::dev` holds a minimal `StateMachine` and planning pool so `rm-node` runs end to end now. The planner follows the contract (pure, deterministic, read set recorded, `Refused` after `max_replans`) but plans no assignments. `rm-node --dev-spin-us N` burns N µs of CPU per plan for load tests. The runtime takes the state machine and a pool factory as parameters (`runtime::start`, `PoolFactory`, `PlanSink`), so workstream D replaces both in `crates/node/src/main.rs` and nothing else changes.
 - Numbers measured with the placeholder are never reported.
 
@@ -524,7 +524,7 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
 
 ## DL-056. Planner details
 
-- Date: 2026-11-01. Status: proposed. Refines DL-020.
+- Date: 2026-11-01. Status: agreed (integration review, 2026-11-02). Refines DL-020.
 - Decision:
   - **Priority** = 1000 × severity + 2 × seconds waited (capped at 600 s). Ten minutes of waiting is worth 1.2 severity levels, so age breaks ties within a level and can lift an old incident one level, no more.
   - Distance, responder capability and resource availability enter through the **assignment cost** of each incident–resource pair: walking distance on the campus map, plus 20 for the second-choice kind of responder (40 for the third), plus 30 per unit the resource is short.
@@ -537,7 +537,7 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
 
 ## DL-057. Plans re-dispatch waiting incidents; incidents are versioned at the coordinator
 
-- Date: 2026-11-01. Status: proposed. Changes `replication::core` and the `PlanOutput::read_set` contract; Abdallah to review.
+- Date: 2026-11-01. Status: agreed (integration review, 2026-11-02). Changes `replication::core` and the `PlanOutput::read_set` contract; Abdallah to review.
 - Decision:
   - A report is planned as a fresh assignment of the top `top_k` open incidents, the new one always included, and **every incident the solution assigns is written**. An incident that found no help when reported is therefore picked up by a later plan.
   - The coordinator now versions **incidents as well as resources** (`versioned_ids` in `core.rs`), so two concurrent plans that both assign one waiting incident cannot both commit. `Snapshot::incidents` carries each incident's version.
@@ -550,7 +550,7 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
 
 ## DL-058. The planning snapshot holds open incidents only, and expired items are pruned
 
-- Date: 2026-11-01. Status: proposed.
+- Date: 2026-11-01. Status: agreed (integration review, 2026-11-02).
 - Decision:
   - `Snapshot` holds every resource but only `Open` incidents, and no assignments. Full incidents and assignments are kept beside it for queries.
   - At every entry whose `seq` is a multiple of 1024, incidents and resources that expired more than 60 s before the latest client timestamp in a committed write are dropped from the snapshot.
@@ -558,7 +558,7 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
 
 ## DL-059. A prioritized responder list makes the cost knob real
 
-- Date: 2026-11-01. Status: proposed. Adds `Plan::responders`.
+- Date: 2026-11-01. Status: agreed (integration review, 2026-11-02). Adds `Plan::responders`.
 - Problem: measured on its own, the assignment step took 0.23 ms at `top_k` 100. Most incident–resource pairs are incompatible, so the Hungarian algorithm finishes far below its worst case. At that cost the nodes are network-bound and load balancing has nothing to balance.
 - Decision: each plan also computes the **prioritized responder list** the project description gives as an example output (p. 3). For up to `top_k` capable responders, the assignment is solved again with the new incident forced onto that responder, and responders are ranked by the total cost. The list is the substitutes to send if the assigned responder cannot go.
 - Measured (release build, 300 resources, 400 waiting incidents):
@@ -574,10 +574,11 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
   Doubling `top_k` costs about 5×, so service time can be set predictably from the configuration.
 - Alternatives: a busy-loop or repeated identical solves. Rejected: CPU spent on nothing the client receives is a sleep in disguise and would be hard to defend in the report.
 - Evidence: `service_time_against_top_k` (ignored by default; run with `--release -- --ignored --nocapture`).
+- Amended 2026-11-02 (DL-071): the list is still ranked over up to `top_k` candidates, so the cost knob is unchanged, but a plan keeps only the best 10. One hundred substitutes made every log entry about 1.2 KB (2.5–3 KB in memory) and bloated replication, catch-up and memory on all three nodes; ten are more than a dispatcher would use.
 
 ## DL-060. The planning worker pool
 
-- Date: 2026-11-01. Status: proposed. Implements DL-017 and the `PlanPool` rules of DL-052.
+- Date: 2026-11-01. Status: agreed (integration review, 2026-11-02). Implements DL-017 and the `PlanPool` rules of DL-052.
 - Decision:
   - `node::WorkerPool`: `planner.worker_threads` OS threads (default cores − 1), one shared queue under a mutex and condition variable. Results go back through a callback, which the runtime forwards to `NodeTask::on_planned`.
   - `submit` never refuses. `is_full` is true when queued plus running jobs reach `planner.queue_capacity`, the admission limit the core task checks before selection.
@@ -587,7 +588,7 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
 
 ## DL-061. An executor answers from the committed entry, not its own copy
 
-- Date: 2026-11-01. Status: proposed. Changes `node::task`; Abdallah to review.
+- Date: 2026-11-01. Status: agreed (integration review, 2026-11-02). Changes `node::task`; Abdallah to review.
 - Problem found: with the real planner in the three-node chaos simulator, seed 5 answered a client with a plan different from the committed one. Sequence: a retransmitted `PROPOSE` drew two `Stale` replies; the executor re-planned on the first and that plan committed; the second, late `Stale` was taken as the answer to the new plan, so the executor re-planned again and overwrote its copy; the coordinator then reported `Committed` (it matches by executor) and the executor answered from the overwritten copy. The fake planner rarely produced `Stale`, so this had not appeared.
 - Decision: on `Committed(seq)` the executor answers with the result in the committed entry. If the entry is not yet applied locally, it answers when that entry is applied.
 - Alternatives: tag each proposal with an attempt number so late replies can be discarded. Rejected for now: it changes the wire protocol for a race that answering from the log already makes harmless.
@@ -624,7 +625,7 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
 - **No false suspicion on waking.** The heartbeat thread re-read the silence flag in its detection step, after a receive wait of up to 5 ms. The silence usually ended during that wait, so the detectors ran before being restarted, against heartbeats from before the silence. The woken node suspected both peers after every injection (3 of 3 in the reviewer's probe). That inflated the false-suspicion count and delayed its `Join`. The detection step now uses the value read at the top of the loop. A regression test checks that the victim logs no `suspect` after `inject_end`; it fails on the previous code.
 - **Client connections are closed on every writer exit.** After a write error or the 5 s write timeout, the writer returned without shutting the socket. The node kept executing that client's requests but never answered them. Both directions are now shut down on every exit, so the client reconnects.
 - **Test timing.** The localhost end-to-end test asserted more than 10 heartbeats after a run that takes about 0.2 s on a fast machine; it now waits for them.
-- Follow-ups recorded, not done before the code freeze:
+- Follow-ups recorded, not done before the code freeze (all but retiring old peer incarnations were done in DL-067 and DL-073):
   - a bounded client input channel;
   - retiring old peer incarnations in the link;
   - logging version and decode errors in `resource_sample`;
@@ -644,3 +645,170 @@ Entries DL-056 to DL-061 record decisions made while implementing workstream D (
   - The pool never starts with 0 planning threads, which would strand every claimed request on a one-core machine.
 - First end-to-end run on one machine (3 nodes, real load generator, 300 requests/s open loop, coordinator silenced for 5 s): 9,002 requests, none lost. p50 4 ms, p99 49 ms. The silenced coordinator was removed from the view after 0.37 s and back in it 0.09 s after waking. Jain's index over busy time 0.986. All three nodes ended with identical logs.
 - Open: the failover-time metric read 1.0 s and 6.5 s in two runs of the same scenario, while the other failure measures barely moved; its in-band threshold needs checking against real baselines before the experiments are reported.
+
+---
+
+Entries DL-066 to DL-070 record the fixes from the pre-deployment review of 2026-11-02: four reviewers checked the merged code against the Phase 1 requirements, and one end-to-end run on one machine (3 nodes, 3 load generators, 450 requests/s, periodic injection plus an operator silence of the coordinator) measured the effects. "Before" and "after" below are that same run (`e2e1`, `e2e2`), same seed and configuration. Owner: Abdallah (integration).
+
+## DL-066. Replication to a silent peer: probes, not repeated batches; status, lease and injection fixes
+
+- Date: 2026-11-02. Status: agreed. Changes `replication::core`; refines DL-030, DL-031 and DL-034.
+- Problems found:
+  - **Append flood.** Every commit flush (10 ms) reset `sent_up_to` to `matched` and resent from there, so a peer that acknowledged nothing got the same batch of up to 256 entries a hundred times a second, and the link kept every copy for retransmission. In the simulator a 5 s silence at 100 requests/s sent 27,909 entries for about 500 committed. In the real run the coordinator sent 66 MB in 8 s to a silenced node and its memory grew to 235 MB without coming back.
+  - **Stuck in SYNCING.** A node waking from a short silence learned its catch-up target from the first `Append` but rechecked its status only when the commit position moved. On an idle cluster it never moved, so the node stayed SYNCING, claimed nothing, and its `active` event (the recovery-time measurement) was missing.
+  - **Lease measured in the wrong place.** The lease counted acknowledgments when the core task processed them. Under overload they wait in its input queue, and a coordinator could step down with nothing wrong, pausing commits for more than a second.
+  - **Injection precondition.** "All three ACTIVE" was approximated by "three in the view, none suspected", which a node that had just woken and not yet caught up satisfied.
+- Decisions:
+  - A peer is **responsive** if it acknowledged an `Append` within two heartbeat intervals. Responsive peers get new entries as they are appended, and on the heartbeat or commit flush only what was never sent; the link delivers what is in flight, and a loss shows up as a failed log-matching check, whose refusal repairs it. An unresponsive peer gets nothing but an empty probe each heartbeat interval; its first acknowledgment restarts the catch-up, one batch per round trip.
+  - A follower rechecks its status after every `Append`.
+  - The runtime tells the core when the transport last accepted anything from each peer (`Core::heard_from`); the lease counts that as well as processed acknowledgments. Safety still rests on epochs (DL-031); the lease only decides when a cut-off coordinator stops trying.
+  - Scheduled and operator injections are refused while a peer is not responsive.
+- Evidence:
+  - New simulator tests: a silenced follower now gets 18 entries while 497 are committed (it was about 28,000); an idle node becomes ACTIVE after a short silence; a coordinator whose peers are heard keeps its lease, and steps down as before when they are not.
+  - Real run after the fix: while node 3 was silent for 8 s the coordinator sent its normal 0.2 MB/s; the 14.5 MB when node 3 woke is the 3,600 entries it had missed, sent once. Coordinator memory ended at 120 MB instead of 235 MB.
+
+## DL-067. Operator and runtime additions for the six-machine runs
+
+- Date: 2026-11-02. Status: agreed. Changes `node::{runtime, net, link, main}`, `rm-ctl`, `proto::config`, `loadgen::sampler`.
+- Decisions:
+  - **Load knob** for the load-imbalance demo: `rm-ctl load <node> --threads N [--duty P] [--duration-ms D]` starts `selection::knob::CpuBurner` threads inside that node's process (operator line `load <threads> <permille> <ms>`), `--threads 0` stops it, and a duration stops it by itself. It has to run inside the node: the score's CPU term is this process's share of the machine (DL-060), so an outside CPU hog would not move it. Each change is logged as `load_knob` (`threads`, `duty_permille`, `duration_ms`, `on`). Before this the burner existed but nothing could start it.
+  - **Clean stop.** `rm-node` flushes its event log and exits 0 on SIGTERM or SIGINT (a one-thread tokio runtime waits for the signals; the workspace forbids `unsafe`), and exits non-zero if the core thread panicked. Before, the runner's SIGINT was ignored and the following SIGTERM lost up to 0.5 s of events.
+  - **Bounded client input.** At most `CLIENT_BACKLOG` = 4,096 client requests wait for the core task; more are dropped unread and counted (`client_overload_dropped`). The client sent the same request to the other two nodes and retries, so an overloaded node simply takes no part, as when its planning queue is full (DL-052).
+  - **Measurements.** Each node `resource_sample` adds new peer messages sent by protocol role (`msgs_tx_election`, `msgs_tx_replication`, `msgs_tx_claim`, `msgs_tx_commit`, `msgs_tx_other`) for the election-overhead measurement; `core_lag_ms_max`, how late the core loop ran, as an overload signal; `events_dropped`; `client_backlog`, `client_overload_dropped`, `decode_errors`, `version_errors`; the round trip and missed-heartbeat share per peer (DL-069); the claim timeout in use; and the load knob. `reply` is logged only when the reply was actually queued for sending. `rm-ctl status` adds `plans`, `claims`, `queue_len`, `cpu_permille`, `load_knob` and `incarnation`, which the live demo reads.
+  - **Operator answers.** A coordinator that declines an injection answers `error: injection refused: <reason>` instead of `ok`.
+  - **Addresses.** `cluster.nodes[].host` must be an IPv4 address. Sockets bind IPv4, and the heartbeat thread sends to the first address a name resolves to; a name that resolved to IPv6 first (common for macOS `.local` names) would have lost every heartbeat silently.
+  - **Clocks.** `clock_offset` falls back to systemd-timesyncd (`timedatectl timesync-status`, the Ubuntu default) when chrony is absent; `source` says which was used.
+  - Smaller: the acceptor sleeps 10 ms after an `accept` error instead of spinning (for example out of file descriptors); the link hands delivered bodies on instead of deep-copying them; the stale "placeholder until D is merged" notes are gone.
+- Evidence: localhost test `the_load_knob_raises_one_nodes_cpu_and_stops_on_time` (operator command, status fields, expiry, refusals); a 50 s run with the knob on node 2 for 20 s from second 15: plans per 5 s were about 740 on every node before, 0 on node 2 and about 1,080 on nodes 1 and 3 during, and back to about 740 each after; SIGTERM stopped all three nodes with complete logs. Parser tests for timesyncd output; config test for host names.
+
+## DL-068. A planning job reads the newest snapshot when it starts
+
+- Date: 2026-11-02. Status: agreed. Changes `PlanJob` (`node::task`), `WorkerPool`, `DevPool`. Resolves the known limit in DL-063.
+- Problem: a job held the snapshot current when it was queued. Under overload each queued job could pin a different version of the state, up to `queue_capacity` (256) full copies, and a job planned from state that could be seconds old, which is why about 7% of requests gave up after the re-plan cap in DL-063's overload run.
+- Decision: the core task publishes the newest snapshot in a shared `SnapshotSlot` after each batch of applied entries; a job carries the slot, and the planning thread reads it when it starts the job. The state still copies its snapshot on a write only while a planning thread holds the old one, as before.
+- Effect: at most one snapshot per planning thread plus the current one stays alive, and every plan reads the freshest committed state. Re-plans in the real run fell from 3.5% to 2.4% of requests.
+- Evidence: `a_job_reads_the_snapshot_current_when_it_starts_not_when_queued` (a job queued behind a blocked one sees the snapshot published after it was queued).
+
+## DL-069. A node ranks itself from the heartbeat it actually sent; node round trips from heartbeat echoes
+
+- Date: 2026-11-02. Status: agreed. Changes `node::{heartbeat, task, runtime}`, `selection::Selector`, `proto::Heartbeat` (`PROTOCOL_VERSION` 3). Refines DL-024 and DL-038.
+- Problem: 25.7% of requests got two competing claims, 1.33 claims per request, and about 37% of requests waited one or two claim timeouts (20–40 ms) before anyone claimed, while planning took about 0.5 ms. In the logs, the typical case was two nodes each ranking the other first and both waiting.
+- Cause: a node reset its own local correction (claims since its last heartbeat, Section 5.1) when its core task refreshed the heartbeat content, but the heartbeat thread sends on its own 100 ms schedule, so the datagram left up to an interval later, and peers reset their count of its claims only when it arrived. For most of each interval the node and its peers counted its claims from different starting points. A claim is worth about 4 score points against a quantum of 50, so with a dozen claims in the gap, one view in four crossed a step the other did not.
+- Decisions:
+  - The heartbeat thread hands each heartbeat back to the core task once sent (`Input::HeartbeatSent`); the node starts ranking itself from that load then, as its peers do on receipt.
+  - **Round trips.** Each heartbeat echoes, per peer, the last heartbeat number received from it and how long it was held; the peer computes `now − sent − held` on its own clock, NTP-style, and smooths it (1/8). The heartbeat thread is independent of planning load, so this is the network round trip. The claim timeout is now `max(claim_timeout_min_ms, 3 × RTT)` as DL-024 intended; nothing called `set_peer_rtt_ms` before, so it was always the minimum. On localhost the round trip is 0.1–0.3 ms; on a congested network it raises the timeout instead of causing spurious claims.
+  - **Missed heartbeats.** Each node now measures every peer's missed-heartbeat share (a moving average over about 32 heartbeats, from gaps in their numbers) and feeds it to the score's reliability term. Its weight stays 0 by default for the reason in DL-047; it is logged per peer so the report can show it.
+- Alternatives: counting only claims for requests seen at least one claim timeout ago, on every node. It also makes the views agree, but delays the correction by a claim timeout and herds every request in that window onto one node. Not needed once the heartbeat cause was removed.
+- Evidence, same run before and after: competing claims 25.7% → 0.46% of requests; claims per request 1.33 → 1.00; duplicate results suppressed by the coordinator 214 → 2; latency mean 18.9 → 6.8 ms, p50 5.2 → 3.1 ms, p95 46 → 10.5 ms, p99 55 → 27 ms; requests lost 0 in both. Load shares and Jain's index unchanged (0.968, 0.969).
+
+## DL-070. Score inputs and defaults
+
+- Date: 2026-11-02. Status: agreed. Changes `proto::config` defaults, `node::workers`, `node::task`. Refines DL-024 and DL-060.
+- Decisions:
+  - `score.service_cap_ms` 500 → 50. Plans take 3–20 ms at the default cost knob, so with a 500 ms cap the service-time term was at most 10 points of the score, less than one quantization step, and the term the protocol describes did nothing.
+  - The service-time average decays by 1/8 per load sample once a node has had nothing to plan for 1 s. Otherwise a node slowed once, for example by the load knob, kept its old average while idle and might never be ranked first again to measure a new one.
+  - **CPU** is measured as the process's accumulated CPU time over our own wall-clock window of at least 250 ms, not `sysinfo`'s `cpu_usage`. On Apple Silicon that divides by a wrong interval when refreshed under 200 ms apart, and about one reading in thirty came out near zero (seen in the review: 98‰ read as 5‰). The placeholder pool measures CPU the same way, so the load knob works with it too.
+  - `config/cluster.example.toml` turns on periodic injection (`[inject] enabled = true`, a random 1–20 s silence every 45–75 s), which the project description requires of the servers themselves. Sweeps set it explicitly.
+  - `policy.ranker = "mwbe_bids"` is refused at start-up. The fresh-bid round was the first item on the plan's cut list and was never built, so that setting ran exactly `mwbe_cached` under another name; a comparison between the two would have measured nothing.
+  - An executor told `NotInView` keeps the request and plans it again after the usual wait instead of dropping it. If the view change that caused the refusal applies, the selector aborts the request first, as before; if it was uncommitted and a new coordinator discarded it, the node is still in the view and still holds the claim, and dropping the request would have stranded it until the client gave up.
+- Evidence: `the_service_time_average_decays_while_idle`, `cpu_use_of_a_busy_thread_is_measured`, the localhost knob test; all simulator and chaos tests unchanged.
+
+## DL-071. The planner's matrix columns are bounded, and the answer is checked
+
+- Date: 2026-11-02. Status: agreed (pre-deployment review). Owner: Youssef; Abdallah reviewed. Refines DL-020, DL-056, DL-059.
+- Problem: `top_k` bounded the rows of the assignment problem but not its columns. Every available resource able to serve any row became a column, and the matrix was solved up to `top_k + 1` times. Resources live for their lease plus 60 s, so during a stress run plans grew from 19 ms (300 resources) to 946 ms (30,000), and latency drifted upwards for reasons unrelated to load balancing.
+- Decision:
+  - Each waiting incident brings its `COLUMNS_PER_ROW` = 3 cheapest capable resources, and the new incident its `top_k` cheapest, which are also the responder candidates. They are found by walking resources grouped by kind, zone and free units, nearest zone first, never by scanning everything per row.
+  - The solver returns the dual prices of the rows. If any row's price exceeds the cost of its c-th cheapest column, other rows took all of its cheap columns; that row's columns double and the problem is solved again. The forced solves that rank responders are checked the same way. The answer is therefore exactly the optimum of the unrestricted problem, not an approximation.
+  - A plan keeps the best 10 responders (DL-059, amended): a report entry went from 1,152 to 257 bytes on the wire.
+  - Rows and dispatch candidates are chosen with a partial selection instead of sorting every open incident.
+- Alternatives: every resource a column (time grows with the resource count); a fixed c without the check (silently suboptimal under contention, which tied costs make common); a spatial index inside `Snapshot` (changes the shared API).
+- Measured scaling: about k² when waiting incidents do not compete for resources, about k³ or steeper when they do. DL-020's "roughly cubic" holds only under contention.
+- Evidence (release build, `top_k` 100):
+
+| Resources / open incidents | Before | After |
+|---|---|---|
+| 300 / 300 | 18.9 ms | 15.5 ms |
+| 3,000 / 2,000 | 82.1 ms | 12.1 ms |
+| 10,000 / 5,000 | 322 ms | 13.0 ms |
+| 30,000 / 10,000 | 946 ms | 13.7 ms |
+
+  `bounding_the_columns_changes_no_total_cost` compares totals with the unbounded solve on 400 random campuses at c = 1, 2 and 3, and fails if the dual check is disabled. `service_time_against_resource_count` and `service_time_against_top_k` are the benches (ignored by default).
+
+## DL-072. Assignments hold units until they expire; time-dependent state is read, not applied
+
+- Date: 2026-11-02. Status: agreed (pre-deployment review). Owner: Youssef; Abdallah reviewed. Changes `ResourceOffer` (`PROTOCOL_VERSION` 3), DL-058, DL-062.
+- Problem:
+  - Units given to an incident never came back when the assignment expired, so over a long run every resource drained to zero.
+  - `IncidentStatus::Expired` was never produced: a query for an incident past its TTL still said Open.
+  - The full incident and assignment maps were never pruned, and a zone query scanned every incident on the core thread.
+- Decision:
+  - `ResourceOffer.holds` lists each assignment's units and expiry, with `capacity == available + Σ holds` always. A resource's free units at time t are its available units plus those of holds expired by t. Every plan that writes a resource first moves its expired holds back into `available`. Apply never moves units by itself.
+  - A report whose solve gives a waiting incident a resource dispatches it as an offer would, each incident served once and version-checked, so returned units do not sit idle while a waiting incident claims them in every solve.
+  - `UpdateResource` counts expired holds as free and keeps capacity at or above the units still held (DL-062).
+  - Queries answer as of the request's `sent_at_ms`: `Expired` for an incident past its TTL, effective availability for a resource, a zone index for zone queries. Once pruned, an item is unknown.
+  - Pruning, at the same log positions as before, also removes incidents, assignments and index entries, and copies the snapshot only if something goes.
+  - **Pruning clock:** the median client timestamp of the last 31 committed entries that carry one (`CLOCK_WINDOW`), instead of the latest. Deterministic as before, and one client with a fast clock can no longer make every node prune live data.
+- Alternatives: releasing units at apply or prune time. Rejected: the coordinator checks only the objects a plan writes, so a concurrent stale plan could overwrite the released units unnoticed, breaking I3. Deriving holds from assignment records was rejected because the snapshot has no per-resource index and the resource's version would not cover them.
+- Reason: availability stays a pure function of committed writes and the reader's timestamp, and every change to it is version-checked like any other write.
+- Evidence: tests for holds returning units, returned units going to the most urgent waiting incident, released units being version-checked, updates, a long run that never over-allocates and keeps reusing units, `Expired` on query, pruning of snapshot, state and index, the zone index against a scan, and `one_client_with_a_fast_clock_cannot_make_the_nodes_prune_live_data`. The real-planner chaos test now keeps its own ledger of assignments and checks that `available + Σ holds == capacity`, that every hold is a committed assignment held once, and that no hold is released early; it fails if a report's resource is dropped from its read set.
+- Known limit: the snapshot is a set of `BTreeMap`s, so a committed write copies it whenever a planning thread holds the old one, about 0.77 ms at 30,000 resources and 10,000 open incidents. Sixty-second runs stay far below that size. A persistent map would remove the copy but changes the shared `proto` API, so it is left for Phase 2.
+- Amended 2026-11-02 after a second review (Youssef; Abdallah reviewed):
+  - **Dispatch keeps the matching.** A resource the solve gives to a waiting incident is dispatched to that incident first, and any units left go to the most urgent capable ones. Handing it to the most urgent instead could leave waiting an incident that only that resource can serve, while another resource sat idle.
+  - **Returned units reach every waiting incident.** Rows are chosen among incidents some free resource can serve. A report also dispatches up to `top_k` resources with units back from expired holds when a capable incident waits outside the rows, which also covers `top_k` 1.
+  - **One client's clock no longer decides expiry.** `Snapshot.clients_now_ms` carries the committed clock, the median above. Plans judge hold release, TTL and leases by the request's timestamp clamped to within 5 s of it (`CLOCK_SLACK_MS`). A client a minute fast could otherwise take a unit still held; the version check accepts that plan, because nothing it read had changed. The window is 31 entries rather than 255 because the median lags real time by half the window's span (13 s at 10 requests/s with 255), which would have returned held units late; at low load they can still come back up to the lag, less 5 s, late.
+  - **Pruned items stay pruned.** `apply` ignores writes of anything that expired by the last prune's cut, so a plan computed before a prune and committed after it cannot bring an incident or resource back.
+  - Evidence: six regression tests ported from the reviewer's reproductions fail before the change and pass after it; `bounding_the_columns_serves_the_same_incidents_under_contention` fails with the dual check disabled; benchmarks unchanged.
+
+## DL-073. Corrections from the second review of DL-066 to DL-070
+
+- Date: 2026-11-02. Status: agreed. Owner: Abdallah. Three independent reviewers re-read the fixes above; these are what they found in the runtime, with the corrections.
+- **Probe position (DL-066).** The probe to a silent peer was placed at `matched`. A new coordinator starts with `matched = 0`, so its probe to the silenced old coordinator always matched at 0, and on waking the old coordinator was sent the whole log: in the simulator about 2,160 entries for 180 missed. The probe now sits at `next − 1`, where the peer's log is believed to end, and a refusal's hint moves it back if that is wrong. Now 202 entries for 182 missed (`a_woken_old_coordinator_is_sent_only_what_it_missed`, which fails on the first version).
+- **Stale catch-up target (DL-066).** The first `Append` after waking may be a link retransmission from before the silence, carrying a commit position the node already applied; with the status check after every `Append`, the node could become ACTIVE at once although newer entries were committed. For two heartbeat intervals after waking the node now stays SYNCING and raises its target to the highest commit position any `Append` carries; at least one of them was sent after the wake. Recovery takes up to 0.2 s longer as a result. `a_retransmitted_append_from_before_a_silence_does_not_end_the_catch_up` delivers such a stale `Append` and fails without the window.
+- **Snapshot slot (DL-068).** The slot held a strong reference to the current snapshot, so the state copied its whole snapshot at the first write of every batch even with no planning thread holding it. It now holds a weak reference; a planning thread upgrades it, and in the moment while the core moves a snapshot nobody holds, waits for the core to republish at the end of the batch. Copies happen again only while a plan actually holds the old snapshot. `StateMachine::snapshot` must therefore return a clone of the `Arc` the state keeps, which every implementation does.
+- **Missed heartbeats (DL-069).** The average was kept in thousandths, where `m −= m / 32` stops at 31, so one lost heartbeat counted for ever; it is now kept in millionths and decays to 0. A node waking from its own silence no longer charges its peers for the heartbeats it dropped. `missed_heartbeats_are_not_charged_for_a_nodes_own_silence_and_decay_to_zero`.
+- **NotInView (DL-070).** If the view change that removed this node applied while its proposal was out, the selector's abort was ignored and the request was planned again every 500 ms for as long as the node stayed out of the view. A `NotInView` now drops the request when this node's applied view no longer contains it, and plans again only when it does.
+- **Smaller:** the first `core_lag_ms_max` sample no longer counts start-up; `rm-ctl silence` asks the coordinator first, so a refusal is reported instead of being hidden behind a follower's "ok", and tries the other nodes when the answer is only "no coordinator".
+
+## DL-074. Third review: the injection margin survives a coordinator change; smaller fixes
+
+- Date: 2026-11-02. Status: agreed. Owner: Abdallah. Five reviewers checked the merged work against the project description and the Phase 1 plan. The correctness reviewer ran the full suite three times (no flakiness), the socket tests ten times, about 5,500 simulator seeds and thirteen targeted scenarios. It found no safety violation: I1–I5 held, every request got one consistent answer, and rejoined nodes always had identical logs and state. Catch-up cost 1.1 entries sent per entry missed. It did find one gap in the plan's criterion A, "the rejoining node always reaches ACTIVE".
+- **Injection margin across coordinator changes.**
+  - The single-failure precondition required the previous injection to have ended `inject_margin_ms` (5 s) ago, but kept only as the coordinator's own "busy until" time. A new coordinator starts that at its election, so after the coordinator itself was silenced, the woken node could be silenced again about 30 ms after waking, before it was ever ACTIVE.
+  - In the reviewer's sweeps this happened in 362 of 7,291 injections. The shipped schedules (an interval at least 20 s longer than the longest silence) cannot hit it, but `rm-ctl silence` could.
+  - The coordinator now keeps, per peer, since when it has acknowledged without a gap. An injection is refused until every peer has been continuously responsive for the margin and has acknowledged the latest view entry, so a rejoining node is ACTIVE first.
+  - Tests: `a_new_coordinator_keeps_the_injection_margin_for_a_woken_node` and `no_injection_while_a_reconnected_node_is_still_catching_up`; both fail without the change.
+- **Every applied view reaches the selector.** The core task passed the selector only the last view of a batch of applied entries. A node that left and rejoined within one batch then counted as a continuous member, so its claims from before it left stayed valid (DL-046). The result could only be a duplicate execution, which I1 suppresses, but it is now exact.
+- **Load generator stops on SIGTERM** as well as Ctrl-C, draining and writing its summary, as `rm-node` does (DL-067). The runner and the demo stop processes with SIGTERM.
+- **`rm-ctl status` lists the peers each node suspects**, so readiness checks can tell a stable cluster from one that only looks ready between flaps (for example when UDP is blocked).
+- Known and accepted: `Selector::tick` scans the request table each tick. Rows are dropped by the clients' `ackedUpTo`, which bounds the table in production; the simulators do not send it, so very long simulations slow down.
+
+## DL-075. Overload: bounded, visible and recoverable; claim-timeout floor; workload TTL
+
+- Date: 2026-11-02. Status: agreed. Owner: Abdallah. From the live performance review: 3 nodes on one 18-core machine, open-loop sweeps to 4,800 requests/s, closed loop, all six policies, the load knob, 20 s silences, automatic injection and a 9-minute soak. Normal operation met expectations: baseline p99 13 ms, detection 224–305 ms, recovery about 200 ms, no flood from a silent node, clean shutdown. Three problems appeared at the edges.
+- **Collapse past saturation.**
+  - Past about 3,600 requests/s the cluster did not degrade; it collapsed and stayed wedged after the load stopped. `rm-ctl status` timed out on every node, coordinator memory reached 0.95 GB, and a third of requests were never answered.
+  - Causes:
+    - executors resent every unanswered proposal every 200 ms with no backoff, although the link already delivers it to a coordinator that stays in place;
+    - the coordinator added a new waiter for each resend of a proposal still waiting for its commit, so each resend also multiplied the replies;
+    - client requests over the core's queue limit were dropped silently, so clients learned nothing until they timed out.
+  - Changes:
+    - Proposal resends back off, from `propose_retry_ms` doubling to 16 times it, and go at once to a new coordinator.
+    - A resent proposal adds no second waiter.
+    - The client queue limit is 1,024 (about a tenth of a second of the core's work), and a request over it is answered `Busy` at once.
+    - Clients now resend early only when all three nodes answered `Busy`; one busy node takes no part while the others serve the request.
+    - The analysis counts requests that never got a final reply (`unresolved`) and warns about overload signals (Busy, refused requests, a full queue), since core-loop lag stayed low during the collapse.
+  - Evidence, the same offered load of 4,800 requests/s for 40 s:
+    - Before: no recovery.
+    - After: about 3,600 requests/s served and every request resolved (answered, or given up after the client's retries). The queue held at its 1,024 limit, with `Busy` answered at once. Peak node memory was 290 MB. After the load, all three nodes answered at once, ACTIVE at the same commit and applied position.
+- **MWBE's tail.**
+  - At 1,200 requests/s, MWBE's p99 was 22 ms against 7–9 ms for the hash, random and round-robin baselines; the medians were equal. In about 1% of requests the nodes still disagreed on the first-ranked node (a claim in flight while the next request is ranked), and the others waited out the 20 ms claim timeout.
+  - The floor of the claim timeout is now 5 ms. It is still three times the measured node round trip when that is larger (DL-069), so it grows on a slower network.
+  - Same run, before and after: p99 21.8 → 8.6 ms (hash 7.4 ms); competing claims 0.49% → 0.59%.
+- **Drift over long runs.**
+  - At a constant 600 requests/s over 9 minutes, plan time rose from 59 µs to 1 ms, node CPU from 11% to 46% and p50 latency from 2.7 to 6.9 ms.
+  - Cause: the workload's incidents lived 10 minutes while offers lived 5. Units given to an incident came back only after 10 minutes, so unserved incidents piled up (about 240,000), and every plan and every snapshot copy grew with them.
+  - The load generator's incident TTL is now 2 minutes, shorter than the resource lease, so held units return while their resource is still offered, and the backlog of waiting incidents is bounded by two minutes of unserved demand. Sweeps restart the nodes for each run, so their 60-second windows were barely affected.
+  - Evidence (5-minute soak at 600 requests/s after the change): p99 latency held at 11.6–12.8 ms every minute (it had climbed from 11 to 24–30 ms), and p50 went from 3.3 to 4.8 ms.
+  - Known limit: plan time still grows with the number of live resources, from 0.15 ms to about 1 ms over 5 minutes at 36,000 resources, because each plan regroups every live resource by kind and zone. It levels off once offers start expiring (lease 300 s plus 60 s of slack); node memory and CPU level off with it. Sixty-second sweep runs restart the nodes and never get there.
+  - Phase 2 fix: keep that grouping inside the snapshot, updated as resources are written, instead of rebuilding it for every plan.

@@ -139,7 +139,7 @@ This is the critical path. Everything that touches shared state goes through it.
 
 **Also owns:**
 - Integration: the Cargo workspace, the end-to-end build, and the shared interfaces in Section 3 below.
-- The node's core-task loop, which drives the replication core and the selector and carries out their actions. It enforces two of the selector's runtime rules (`crates/selection` docs): never drop an `Execute`, and reply BUSY to the client before a request reaches selection when the planning pool is full. Done: `crates/node/src/task.rs` (DL-052). What remains is running it on the async runtime with B's transport and D's pool.
+- The node's core-task loop, which drives the replication core and the selector and carries out their actions. It enforces two of the selector's runtime rules (`crates/selection` docs): never drop an `Execute`, and reply BUSY to the client before a request reaches selection when the planning pool is full. Done: `crates/node/src/task.rs` (DL-052), running on B's thread-based runtime with D's pool in `rm-node` (DL-054, DL-065).
 - Deployment scripts, the machine config, and runs on the six physical machines (Section 1.4).
 - Report assembly and final editing.
 
