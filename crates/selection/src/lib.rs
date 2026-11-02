@@ -52,8 +52,10 @@
 //!   the request on, and the client retries (design log DL-017).
 //! - **Always commit something.** If planning is rejected as stale more than
 //!   `timeouts.max_replans` times, propose `OpResult::Refused` so the request
-//!   commits and its retries are answered. A `NotInView` outcome needs no
-//!   action: the view change that caused it reaches `set_view`.
+//!   commits and its retries are answered. On a `NotInView` outcome the
+//!   core task drops the request if its own view no longer holds this node
+//!   (the view change reaches `set_view`), and otherwise plans it again,
+//!   because the view entry that excluded it may be discarded (DL-073).
 //!
 //! After each call the runtime may pass [`Selector::rank1_hint`] to
 //! `Core::set_rank1_hint`, so the operator can silence the node currently

@@ -292,7 +292,22 @@ async fn serve_conn(i: usize, stream: TcpStream, st: Arc<State>) {
             continue;
         }
         st.nodes[i].received.fetch_add(1, Ordering::Relaxed);
-        if creq.version != PROTOCOL_VERSION || st.executor(&creq.req.id) != i {
+        if creq.version != PROTOCOL_VERSION {
+            continue;
+        }
+        // Like a real node, every node whose queue is full refuses at once,
+        // before any election; the others take part as usual.
+        if st.nodes[i].queued.load(Ordering::Relaxed) >= st.opts.queue_cap {
+            tokio::spawn(answer(
+                i,
+                creq.req.id,
+                ReplyBody::Busy,
+                st.clone(),
+                wr.clone(),
+            ));
+            continue;
+        }
+        if st.executor(&creq.req.id) != i {
             continue;
         }
         tokio::spawn(execute(i, creq, st.clone(), wr.clone()));
@@ -335,6 +350,16 @@ async fn execute(
         }
         ReplyBody::Ok(OpResult::Accepted)
     };
+    answer(i, id, body, st, wr).await;
+}
+
+async fn answer(
+    i: usize,
+    id: ReqId,
+    body: ReplyBody,
+    st: Arc<State>,
+    wr: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+) {
     // A silenced node sends nothing, even for work it finished.
     if st.is_silent(i) {
         return;

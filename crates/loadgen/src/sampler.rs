@@ -140,9 +140,10 @@ pub fn log_machine_info(log: &EventLog) {
 
 /// Clock offset against the time source, in nanoseconds, positive when this
 /// machine's clock is ahead (so `corrected = local - offset`), and where it
-/// came from. Reads `chronyc tracking`; `RM_CLOCK_OFFSET_NS` overrides it for
-/// machines without chrony. `None` means unknown, and the analysis then
-/// treats that machine's cross-machine timings as uncorrected.
+/// came from. Reads `chronyc tracking`, or else systemd-timesyncd's last
+/// measurement (`timedatectl timesync-status`, the default on Ubuntu);
+/// `RM_CLOCK_OFFSET_NS` overrides both. `None` means unknown, and the
+/// analysis then treats that machine's cross-machine timings as uncorrected.
 pub fn clock_offset() -> (Option<i64>, &'static str) {
     if let Some(n) = std::env::var("RM_CLOCK_OFFSET_NS")
         .ok()
@@ -150,16 +151,63 @@ pub fn clock_offset() -> (Option<i64>, &'static str) {
     {
         return (Some(n), "manual");
     }
-    match std::process::Command::new("chronyc")
-        .arg("tracking")
-        .output()
-    {
-        Ok(o) if o.status.success() => match parse_chrony(&String::from_utf8_lossy(&o.stdout)) {
+    // A non-interactive ssh shell's PATH often lacks Homebrew's directory,
+    // so also try where chrony is usually installed.
+    let chrony = [
+        "chronyc",
+        "/opt/homebrew/bin/chronyc",
+        "/usr/local/bin/chronyc",
+        "/usr/sbin/chronyc",
+        "/usr/bin/chronyc",
+    ]
+    .iter()
+    .find_map(|c| {
+        std::process::Command::new(c)
+            .arg("tracking")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    });
+    match chrony {
+        Some(o) => match parse_chrony(&String::from_utf8_lossy(&o.stdout)) {
             Some(n) => (Some(n), "chrony"),
             None => (None, "chrony_unparsed"),
         },
-        _ => (None, "unavailable"),
+        None => match std::process::Command::new("timedatectl")
+            .arg("timesync-status")
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                match parse_timesyncd(&String::from_utf8_lossy(&o.stdout)) {
+                    Some(n) => (Some(n), "timesyncd"),
+                    None => (None, "timesyncd_unparsed"),
+                }
+            }
+            _ => (None, "unavailable"),
+        },
     }
+}
+
+/// Parses the `Offset` line of `timedatectl timesync-status`, for example
+/// `      Offset: -1.163ms`. timesyncd reports the server's time minus this
+/// machine's, so the sign is flipped to match [`clock_offset`].
+pub fn parse_timesyncd(text: &str) -> Option<i64> {
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("Offset:"))?;
+    let v = line.split_once(':')?.1.trim();
+    let split = v.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(v.len());
+    let (num, unit) = v.split_at(split);
+    let x: f64 = num.trim().parse().ok()?;
+    let scale = match unit.trim() {
+        "ns" => 1.0,
+        "us" | "µs" => 1e3,
+        "ms" => 1e6,
+        "s" => 1e9,
+        "min" => 60e9,
+        _ => return None,
+    };
+    Some((-x * scale).round() as i64)
 }
 
 /// Parses the `System time` line of `chronyc tracking`, for example
@@ -206,6 +254,16 @@ mod tests {
             parse_chrony("System time     : abc seconds fast of NTP time"),
             None
         );
+    }
+
+    #[test]
+    fn timesyncd_output_is_parsed_with_its_unit_and_sign_flipped() {
+        let text = "       Server: 91.189.89.199 (ntp.ubuntu.com)\n         Leap: normal\n       Offset: -1.163ms\n        Delay: 52.479ms\n";
+        assert_eq!(parse_timesyncd(text), Some(1_163_000));
+        assert_eq!(parse_timesyncd("Offset: +850us"), Some(-850_000));
+        assert_eq!(parse_timesyncd("Offset: 2s"), Some(-2_000_000_000));
+        assert_eq!(parse_timesyncd("Offset: 3 parsecs"), None);
+        assert_eq!(parse_timesyncd("no offset here"), None);
     }
 
     #[test]

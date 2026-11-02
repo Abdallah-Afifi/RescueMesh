@@ -135,6 +135,7 @@ pub fn plan(job: &PlanJob, executor: NodeId, resources: u32) -> PlanOutput {
     let r = resource_of(&id, resources);
     let (avail, ver) = job
         .snapshot
+        .get()
         .resources
         .get(&r)
         .map(|(o, v)| (o.available, *v))
@@ -149,6 +150,7 @@ pub fn plan(job: &PlanJob, executor: NodeId, resources: u32) -> PlanOutput {
             available: avail - 1,
             zone: ZoneId(0),
             expires_at_ms: 0,
+            holds: Vec::new(),
         })],
         result: OpResult::Planned(Plan {
             incident: id,
@@ -543,6 +545,7 @@ impl Sim {
                     continue;
                 }
                 let hb = self.nodes[from.index()].task.heartbeat();
+                self.nodes[from.index()].task.heartbeat_sent(&hb);
                 for to in NodeId::ALL.into_iter().filter(|&t| t != from) {
                     self.transmit(Packet::Heartbeat { to, hb: hb.clone() });
                 }
@@ -616,7 +619,7 @@ impl Sim {
                     writes: vec![],
                     result: OpResult::Refused("resources kept changing".into()),
                 },
-                Some(p) => proto::Planner::plan(p, &job.snapshot, &job.req.req),
+                Some(p) => proto::Planner::plan(p, &job.snapshot.get(), &job.req.req),
                 None => plan(&job, n, self.params.resources),
             };
             let o = self.nodes[n.index()]

@@ -246,6 +246,222 @@ fn a_short_silence_needs_no_view_change() {
 }
 
 #[test]
+fn after_a_short_silence_on_an_idle_cluster_the_node_becomes_active() {
+    // With no load the commit position never moves after the node wakes, so
+    // it must become current from the first `Append` alone (DL-066).
+    let mut sim = started(19);
+    sim.operator_silence(N2, SilenceTarget::Node(N1), 150);
+    sim.run_until(1_000, "n1 silenced", |s| s.node(N1).silenced);
+    sim.run_until(2_000, "n1 back", |s| !s.node(N1).silenced);
+    sim.run_until(500, "n1 active without new commits", |s| {
+        s.core(N1).is_active()
+    });
+    sim.settle_and_check();
+}
+
+#[test]
+fn a_silenced_follower_gets_probes_not_the_same_entries_again_and_again() {
+    let mut sim = started(20);
+    sim.workload = true; // one request every 10 ms
+    sim.run_for(1_000);
+    sim.operator_silence(N2, SilenceTarget::Node(N1), 5_000);
+    sim.run_until(1_000, "n1 silenced", |s| s.node(N1).silenced);
+    let commit_before = sim.core(N3).commit_seq().0;
+    sim.run_until(6_000, "n1 back", |s| !s.node(N1).silenced);
+    let committed_meanwhile = sim.core(N3).commit_seq().0 - commit_before;
+    let sent = sim.entries_to_silenced[N1.index()];
+    eprintln!("{sent} entries sent to the silenced node; {committed_meanwhile} committed");
+    // Before DL-066 the coordinator resent a full batch every commit flush:
+    // about 28,000 entries for about 500 committed. Now only what went out
+    // before the silence was noticed (200 ms of traffic) and nothing more.
+    assert!(
+        sent <= committed_meanwhile / 10,
+        "{sent} entries sent to the silenced node while {committed_meanwhile} were committed"
+    );
+    sim.run_until(5_000, "n1 caught up and active", |s| {
+        s.core(N1).is_active() && s.core(N1).view().contains(N1)
+    });
+    sim.settle_and_check();
+}
+
+#[test]
+fn a_woken_old_coordinator_is_sent_only_what_it_missed() {
+    // Regression: the new coordinator starts with `matched = 0`, and a probe
+    // placed at `matched` always matched, so the whole log was resent to the
+    // old coordinator when it woke (found in review of DL-066).
+    for seed in [1, 2, 3] {
+        let mut sim = started(30 + seed);
+        sim.workload = true;
+        sim.run_for(20_000);
+        let old = sim.coordinator().unwrap();
+        let at_silence = sim.core(old).last_seq().0;
+        sim.operator_silence(old, SilenceTarget::Coordinator, 2_000);
+        sim.run_until(1_000, "silenced", |s| s.node(old).silenced);
+        sim.run_until(3_000, "back", |s| !s.node(old).silenced);
+        let sent_before = sim.entries_sent[old.index()];
+        let new = sim.coordinator().unwrap();
+        let missed = sim.core(new).last_seq().0 - at_silence;
+        sim.run_until(5_000, "old coordinator active in the view", |s| {
+            s.core(old).is_active() && s.core(old).view().contains(old)
+        });
+        let sent = sim.entries_sent[old.index()] - sent_before;
+        eprintln!("seed {seed}: missed {missed}, sent after wake {sent}, log {at_silence}");
+        assert!(
+            sent <= 3 * missed + 256,
+            "seed {seed}: {sent} entries sent after waking for {missed} missed (log {at_silence})"
+        );
+        sim.settle_and_check();
+    }
+}
+
+#[test]
+fn a_retransmitted_append_from_before_a_silence_does_not_end_the_catch_up() {
+    // Regression (review of DL-066): the first `Append` after waking may be a
+    // link retransmission from before the silence, carrying an old commit
+    // position the node has already applied. It must not make the node
+    // ACTIVE while newer commits exist.
+    let mut sim = started(40);
+    sim.workload = true;
+    sim.run_for(1_000);
+    let c = sim.coordinator().unwrap();
+    let f = NodeId::ALL.into_iter().find(|&n| n != c).unwrap();
+    sim.operator_silence(c, SilenceTarget::Node(f), 150);
+    sim.run_until(1_000, "silenced", |s| s.node(f).silenced);
+    // What `f` already holds when it goes quiet: an `Append` carrying this
+    // commit position is what a retransmission from before the silence
+    // looks like.
+    let old = sim.core(f).applied_seq();
+    let old_epoch = sim.core(f).entry(old).unwrap().epoch;
+    sim.run_until(2_000, "back", |s| !s.node(f).silenced);
+    let woke = sim.now;
+    let commit_at_wake = sim.core(c).commit_seq();
+    assert!(commit_at_wake > old, "commits happened during the silence");
+    sim.deliver(
+        f,
+        c,
+        proto::NodeMsg::Append {
+            epoch: sim.core(c).epoch(),
+            prev_seq: old,
+            prev_epoch: old_epoch,
+            entries: vec![],
+            commit: old,
+        },
+    );
+    assert!(
+        !sim.core(f).is_active(),
+        "a stale target ended the catch-up"
+    );
+    // Within two heartbeat intervals of waking it stays SYNCING whatever
+    // `Append`s arrive, and becomes ACTIVE only at the newest target.
+    sim.run_until(1_000, "active", |s| s.core(f).is_active());
+    assert!(sim.now - woke >= 200, "active after {} ms", sim.now - woke);
+    assert!(sim.core(f).applied_seq() >= commit_at_wake);
+    sim.settle_and_check();
+}
+
+#[test]
+fn a_coordinator_whose_peers_are_heard_keeps_its_lease_while_acks_queue() {
+    // The runtime reports transport-level contact through `heard_from`; it
+    // stands in for acknowledgments the core has not processed yet.
+    let mut sim = started(21);
+    let c = sim.coordinator().unwrap();
+    sim.isolated[c.index()] = true;
+    let t0 = sim.now;
+    for t in 0..240 {
+        sim.step();
+        if t % 20 == 0 {
+            let now = sim.now;
+            for p in NodeId::ALL.into_iter().filter(|&p| p != c) {
+                sim.heard_from(c, p, now);
+            }
+        }
+    }
+    assert_eq!(
+        sim.core(c).role(),
+        Role::Coordinator,
+        "lease kept by contact"
+    );
+    // Without contact the lease runs out as before.
+    sim.run_until(1_000, "step down", |s| {
+        s.core(c).role() != Role::Coordinator
+    });
+    assert!(
+        sim.now - t0 <= 240 + 260,
+        "stepped down after {} ms",
+        sim.now - t0
+    );
+    sim.isolated[c.index()] = false;
+    sim.settle_and_check();
+}
+
+#[test]
+fn a_new_coordinator_keeps_the_injection_margin_for_a_woken_node() {
+    // Regression (DL-074): the margin after an injection was kept only as
+    // "when the last injection ends", which a new coordinator does not know.
+    // The silenced old coordinator could be silenced again right after
+    // waking, before it was ever ACTIVE.
+    let mut sim = started(102);
+    sim.workload = true;
+    sim.run_for(1_000);
+    let old = sim.coordinator().unwrap();
+    sim.operator_silence(old, SilenceTarget::Coordinator, 3_000);
+    sim.run_until(1_000, "silenced", |s| s.node(old).silenced);
+    sim.run_until(4_000, "woke", |s| !s.node(old).silenced);
+    let woke = sim.now;
+    let mut accepted = None;
+    for _ in 0..6_000 {
+        if let Some(c) = sim.coordinator().filter(|&c| c != old) {
+            let refused = sim.count_events(EventKind::InjectRefused);
+            sim.operator_silence(c, SilenceTarget::Node(old), 1_000);
+            if sim.count_events(EventKind::InjectRefused) == refused {
+                accepted = Some((sim.now - woke, sim.core(old).is_active()));
+                break;
+            }
+        }
+        sim.step();
+    }
+    let (after, was_active) = accepted.expect("an injection is accepted eventually");
+    assert!(
+        after >= 2_000,
+        "accepted {after} ms after waking (margin 2000)"
+    );
+    assert!(
+        was_active,
+        "the woken node was not ACTIVE when silenced again"
+    );
+    sim.settle_and_check();
+}
+
+#[test]
+fn no_injection_while_a_reconnected_node_is_still_catching_up() {
+    // Regression (DL-074): "responsive" is not "ACTIVE". A node cut off long
+    // enough to leave the view must be back in it and caught up, for the
+    // whole margin, before anyone is silenced.
+    let mut sim = started(300);
+    sim.workload = true;
+    sim.run_for(1_000);
+    let c = sim.coordinator().unwrap();
+    let f = NodeId::ALL.into_iter().find(|&n| n != c).unwrap();
+    sim.isolated[f.index()] = true;
+    sim.run_until(3_000, "f removed", |s| !s.core(c).view().contains(f));
+    sim.isolated[f.index()] = false;
+    let starts = sim.count_events(EventKind::InjectStart);
+    let back = sim.now;
+    while sim.now < back + 1_500 {
+        if let Some(co) = sim.coordinator() {
+            sim.operator_silence(co, SilenceTarget::Coordinator, 5_000);
+        }
+        sim.step();
+    }
+    assert_eq!(
+        sim.count_events(EventKind::InjectStart),
+        starts,
+        "an injection was accepted while a node was rejoining"
+    );
+    sim.settle_and_check();
+}
+
+#[test]
 fn an_operator_can_silence_the_coordinator() {
     let mut sim = started(10);
     sim.workload = true;

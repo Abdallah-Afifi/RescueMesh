@@ -85,7 +85,12 @@ const RESOURCES: [ResourceKind; 7] = [
 const SEVERITY_WEIGHTS: [u64; 5] = [30, 25, 20, 15, 10];
 
 const REMEMBER: usize = 32;
-const INCIDENT_TTL_MS: u64 = 600_000;
+/// How long a reported incident stays open, and so how long the units given
+/// to it are held. Shorter than the resource lease, so held units come back
+/// while their resource is still offered; with 10 minutes, unserved
+/// incidents piled up for 10 minutes and every plan and snapshot copy grew
+/// with them (DL-075).
+const INCIDENT_TTL_MS: u64 = 120_000;
 const LEASE_MS: u64 = 300_000;
 
 /// Draws operations for one simulated user.

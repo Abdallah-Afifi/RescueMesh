@@ -62,6 +62,22 @@ pub enum ResourceKind {
     Volunteer,
 }
 
+/// Units of a resource held by one assignment until the assignment expires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hold {
+    pub incident: IncidentId,
+    pub units: u32,
+    /// The assignment's `expires_at_ms`. From this time on the units count as
+    /// free again, and the next plan that writes the resource releases them.
+    pub expires_at_ms: u64,
+}
+
+/// A resource and how its units are split.
+///
+/// `capacity == available + Σ holds.units` always holds. A hold whose
+/// expiry has passed still counts as held here until a plan writes the
+/// resource; readers that need the units free at time `t` add the units of
+/// holds with `expires_at_ms <= t` to `available`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceOffer {
     pub id: ResourceId,
@@ -71,6 +87,8 @@ pub struct ResourceOffer {
     pub available: u32,
     pub zone: ZoneId,
     pub expires_at_ms: u64,
+    /// One entry per assignment still holding units, oldest first.
+    pub holds: Vec<Hold>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,7 +160,9 @@ pub struct Plan {
     pub route: Vec<ZoneId>,
     /// Prioritized responder list (spec p. 3): capable resources, best first,
     /// ranked by the total dispatch cost if the incident were given each one.
-    /// The substitutes if the assigned responder cannot go (DL-059).
+    /// The substitutes if the assigned responder cannot go (DL-059). The
+    /// planner ranks up to `top_k` candidates but keeps only the best few
+    /// (`incident::planner::RESPONDERS_KEPT`), so plans stay small in the log.
     pub responders: Vec<ResourceId>,
 }
 

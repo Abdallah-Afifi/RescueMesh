@@ -134,6 +134,9 @@ mod tests {
             w_service: 200,
             w_missed: 200,
             w_rtt: 200,
+            // The cap the example was worked with (the default is now 50 ms,
+            // DL-070).
+            service_cap_ms: 500,
             ..ScoreCfg::default()
         };
         let req = req_with_rtt(1, [Some(25_000), Some(10_000), Some(25_000)]);

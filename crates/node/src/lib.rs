@@ -10,7 +10,9 @@
 //! - [`link`]: application-level acknowledgment and retransmission.
 //! - [`heartbeat`] and [`fd`]: UDP heartbeats on a dedicated thread and the
 //!   φ-accrual failure detector.
-//! - [`dev`]: a placeholder planner and pool until workstream D's lands.
+//! - [`workers`]: the planning worker pool that runs workstream D's planner.
+//! - [`dev`]: a placeholder planner and pool for runtime stress tests
+//!   (`rm-node --dev-spin-us`).
 
 pub mod dev;
 pub mod fd;
@@ -21,5 +23,5 @@ pub mod runtime;
 pub mod task;
 pub mod workers;
 
-pub use task::{NodeTask, Out, PlanJob, PlanPool};
+pub use task::{NodeTask, Out, PlanJob, PlanPool, SnapshotSlot};
 pub use workers::{OnPlanned, WorkerPool};

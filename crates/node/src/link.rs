@@ -302,7 +302,7 @@ impl Link {
 
     /// An envelope from the peer. Returns the body to deliver to the core
     /// task, or `None` for acknowledgments, fillers and duplicates.
-    pub fn on_receive(&mut self, env: &Envelope, now: u64) -> Option<NodeMsg> {
+    pub fn on_receive(&mut self, env: Envelope, now: u64) -> Option<NodeMsg> {
         self.on_ack(env.ack_up_to);
         let n = env.msg_id.n;
         if n == 0 {
@@ -332,7 +332,7 @@ impl Link {
             return None; // filler
         }
         self.stats.delivered += 1;
-        Some(env.body.clone())
+        Some(env.body)
     }
 }
 
@@ -364,7 +364,9 @@ mod tests {
 
     /// Delivers `envs` from one side to the other, returning delivered bodies.
     fn deliver(to: &mut Link, envs: &[Envelope], now: u64) -> Vec<NodeMsg> {
-        envs.iter().filter_map(|e| to.on_receive(e, now)).collect()
+        envs.iter()
+            .filter_map(|e| to.on_receive(e.clone(), now))
+            .collect()
     }
 
     #[test]
@@ -455,7 +457,7 @@ mod tests {
         // An acknowledgment beyond anything sent (an earlier incarnation).
         let mut bogus = ack[0].clone();
         bogus.ack_up_to = 1_000;
-        a.on_receive(&bogus, 600);
+        a.on_receive(bogus, 600);
         assert_eq!(a.unacked(), 4);
     }
 

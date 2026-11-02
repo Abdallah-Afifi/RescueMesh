@@ -13,6 +13,7 @@
 
 use crate::runtime::{PlanSink, PoolFactory};
 use crate::task::{PlanJob, PlanPool};
+use crate::workers::CpuSampler;
 use proto::{
     Incident, IncidentStatus, LoadSample, Op, OpResult, Plan, PlanOutput, ReqId, ResourceOffer,
     Snapshot, Write,
@@ -82,6 +83,7 @@ pub fn plan(snap: &Snapshot, job: &PlanJob, max_replans: u32) -> PlanOutput {
                 available: *capacity,
                 zone: *zone,
                 expires_at_ms: req.sent_at_ms + lease_ms,
+                holds: Vec::new(),
             })],
             result: OpResult::Accepted,
         },
@@ -120,6 +122,7 @@ struct Queue {
 pub struct DevPool {
     q: Arc<(Mutex<Queue>, Condvar)>,
     capacity: usize,
+    cpu: Mutex<CpuSampler>,
 }
 
 impl DevPool {
@@ -134,7 +137,11 @@ impl DevPool {
                     .spawn(move || worker(&q, &sink, max_replans, spin_us))
                     .expect("spawn planning thread");
             }
-            Box::new(DevPool { q, capacity }) as Box<dyn PlanPool>
+            Box::new(DevPool {
+                q,
+                capacity,
+                cpu: Mutex::new(CpuSampler::new()),
+            }) as Box<dyn PlanPool>
         })
     }
 }
@@ -152,7 +159,7 @@ fn worker(q: &(Mutex<Queue>, Condvar), sink: &PlanSink, max_replans: u32, spin_u
             }
         };
         let t = Instant::now();
-        let out = plan(&job.snapshot, &job, max_replans);
+        let out = plan(&job.snapshot.get(), &job, max_replans);
         let spin = Duration::from_micros(spin_us);
         while t.elapsed() < spin {
             std::hint::spin_loop();
@@ -189,7 +196,12 @@ impl PlanPool for DevPool {
         let g = self.q.0.lock().unwrap_or_else(|e| e.into_inner());
         LoadSample {
             queue_len: (g.jobs.len() + g.running) as u32,
-            cpu_permille: 0, // workstream D measures CPU
+            // The same measure as the real pool, so the load knob works here too.
+            cpu_permille: self
+                .cpu
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .permille(),
             service_ewma_us: g.ewma_us,
         }
     }

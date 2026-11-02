@@ -102,12 +102,12 @@ pub async fn run(args: FrontendArgs) -> io::Result<MachineSummary> {
     for child in &mut children {
         let status = tokio::select! {
             s = child.wait() => s?,
-            _ = tokio::signal::ctrl_c(), if !interrupted => {
+            _ = crate::stop_signal(), if !interrupted => {
                 interrupted = true;
                 eprintln!("stopping: workers are draining (Ctrl-C again to kill them)");
                 tokio::select! {
                     s = child.wait() => s?,
-                    _ = tokio::signal::ctrl_c() => {
+                    _ = crate::stop_signal() => {
                         let _ = child.kill().await;
                         child.wait().await?
                     }

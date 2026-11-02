@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to these types. Receivers drop frames
 /// with a different version and log an error.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 // ---------------------------------------------------------------- client ↔ node
 
@@ -208,6 +208,22 @@ pub struct Heartbeat {
     pub commit: Seq,
     pub applied: Seq,
     pub load: LoadSample,
+    /// For each peer heard from: its latest heartbeat number and how long it
+    /// was held before this one was sent. The peer computes its round trip
+    /// to this node from it, NTP-style, without reading anyone else's clock
+    /// (DL-069). Filled in by the heartbeat thread.
+    pub echo: Vec<Echo>,
+}
+
+/// One round-trip echo carried by a [`Heartbeat`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Echo {
+    /// The node whose heartbeat is echoed.
+    pub to: NodeId,
+    /// That heartbeat's number.
+    pub n: u64,
+    /// Microseconds between receiving it and sending this heartbeat.
+    pub held_us: u32,
 }
 
 /// Load metrics for the score (Section 5.1). Integers so that every node

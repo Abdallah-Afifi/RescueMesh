@@ -502,6 +502,10 @@ impl Client {
             let attempt_start = Instant::now();
             let timeout = pol.attempt_timeout(base, attempt, &mut rng);
             let mut deadline = attempt_start + timeout;
+            // Nodes that answered `Busy` to this attempt. One busy node takes
+            // no part while the others still serve the request, so only when
+            // every node is busy does the client resend early (DL-075).
+            let mut busy_from: u8 = 0;
             loop {
                 tokio::select! {
                     msg = reg.rx.recv() => {
@@ -524,7 +528,10 @@ impl Client {
                             }
                             ReplyBody::Busy => {
                                 self.log_reply(ctx, attempt, Some(reply.from), "busy", ctx.started.elapsed(), attempt_start.elapsed());
-                                deadline = deadline.min(Instant::now() + pol.busy_delay(attempt, &mut rng));
+                                busy_from |= 1 << (reply.from.0 & 7);
+                                if busy_from.count_ones() as usize >= NodeId::ALL.len() {
+                                    deadline = deadline.min(Instant::now() + pol.busy_delay(attempt, &mut rng));
+                                }
                             }
                             ReplyBody::Error(e) => {
                                 self.log_reply(ctx, attempt, Some(reply.from), "error", ctx.started.elapsed(), attempt_start.elapsed());

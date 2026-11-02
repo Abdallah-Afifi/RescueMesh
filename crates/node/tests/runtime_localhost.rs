@@ -440,3 +440,53 @@ fn a_node_waking_from_a_silence_does_not_suspect_its_peers() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_load_knob_raises_one_nodes_cpu_and_stops_on_time() {
+    // The operator command behind `rm-ctl load` (DL-067), the status fields
+    // the live demo reads, and a refusal the operator sees at once.
+    let cfg = config(5);
+    let nodes = start(&cfg, 0, 1);
+    wait_until("settled", Duration::from_secs(10), || {
+        settled(&nodes, "[1,2,3]")
+    });
+    let answer = operator(&cfg, NodeId(2), "load 2 900 600");
+    assert!(answer.starts_with("ok"), "{answer}");
+    let s = nodes[1].status();
+    assert!(s.contains("\"load_knob\":{\"threads\":"), "{s}");
+    assert_ne!(field(&s, "threads"), "0", "{s}");
+    for key in [
+        "plans",
+        "claims",
+        "queue_len",
+        "cpu_permille",
+        "incarnation",
+        "suspected",
+    ] {
+        assert!(!field(&s, key).is_empty(), "{key} missing from {s}");
+    }
+    // The node's measured CPU rises while the burner runs.
+    wait_until("cpu rises", Duration::from_secs(3), || {
+        field(&nodes[1].status(), "cpu_permille")
+            .parse::<u32>()
+            .is_ok_and(|c| c > 0)
+    });
+    wait_until("knob stops by itself", Duration::from_secs(3), || {
+        field(&nodes[1].status(), "threads") == "0"
+    });
+    assert!(operator(&cfg, NodeId(2), "load x 1 1").starts_with("error"));
+    assert!(operator(&cfg, NodeId(2), "load 1 2000 0").starts_with("error"));
+    // `threads 0` turns it off at once.
+    assert!(operator(&cfg, NodeId(1), "load 1 500 0").starts_with("ok"));
+    assert!(operator(&cfg, NodeId(1), "load 0 0 0").starts_with("ok"));
+    assert_eq!(field(&nodes[0].status(), "threads"), "0");
+    // A coordinator that declines an injection says so to the operator.
+    let coord: u8 = field(&nodes[0].status(), "coordinator").parse().unwrap();
+    let answer = operator(&cfg, NodeId(coord), "silence 1 20000");
+    assert!(answer.starts_with("ok"), "{answer}");
+    let answer = operator(&cfg, NodeId(coord), "silence 2 1000");
+    assert!(
+        answer.starts_with("error: injection refused"),
+        "a second silence during the first must be refused: {answer}"
+    );
+}

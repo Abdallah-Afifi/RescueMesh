@@ -308,6 +308,7 @@ dependencies = [
  "selection",
  "serde_json",
  "sysinfo",
+ "tokio",
 ]
 
 [[package]]

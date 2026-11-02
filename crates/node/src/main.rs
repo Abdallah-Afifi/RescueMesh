@@ -5,10 +5,14 @@
 //! ```
 //!
 //! Starts the transport, heartbeats and failure detector (workstream B), the
-//! core task with replication and selection (A, C), and the planning pool.
-//! Until workstream D's incident service is merged the pool is the
-//! placeholder in `node::dev`; `--dev-spin-us` makes each plan burn CPU.
+//! core task with replication and selection (A, C), and workstream D's
+//! incident planner on its worker pool (DL-065). `--dev-spin-us` swaps in
+//! the placeholder planner of `node::dev` for runtime stress tests only.
 //! Events go to `<run.log_dir>/<run.run_id>/cloud<id>-node.jsonl`.
+//!
+//! SIGTERM or SIGINT flushes the event log and exits with status 0, so the
+//! experiment runner loses no events when it stops the node (DL-067). The
+//! exit status is non-zero if the core thread panicked.
 
 use clap::Parser;
 use client::EventLog;
@@ -114,14 +118,60 @@ fn main() -> ExitCode {
         cfg.run.run_id, me.host, me.port, me.heartbeat_port, cfg.policy.ranker
     );
     let opts = NodeOpts::new(id, cfg, inc, Some(log.clone()));
-    match runtime::start(opts, Box::new(State::new()), pool) {
-        Ok(node) => node.join(),
+    let node = match runtime::start(opts, Box::new(State::new()), pool) {
+        Ok(node) => node,
         Err(e) => {
             eprintln!("{id}: cannot start: {e}");
             log.finish();
             return ExitCode::FAILURE;
         }
-    }
+    };
+    stop_on_signal(id, log.clone());
+    let clean = node.join();
     log.finish();
-    ExitCode::SUCCESS
+    if clean {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("{id}: the core thread panicked");
+        ExitCode::FAILURE
+    }
+}
+
+/// On SIGTERM or SIGINT: flush the event log and exit 0. Runs a one-thread
+/// runtime on its own thread; the node itself uses no async code.
+fn stop_on_signal(id: NodeId, log: Arc<EventLog>) {
+    let spawned = std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async {
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{SignalKind, signal};
+                    let (Ok(mut term), Ok(mut int)) = (
+                        signal(SignalKind::terminate()),
+                        signal(SignalKind::interrupt()),
+                    ) else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = term.recv() => {}
+                        _ = int.recv() => {}
+                    }
+                }
+                #[cfg(not(unix))]
+                let _ = tokio::signal::ctrl_c().await;
+            });
+            eprintln!("{id}: stopping on signal");
+            log.finish();
+            std::process::exit(0);
+        });
+    if let Err(e) = spawned {
+        eprintln!("{id}: cannot watch for signals: {e}");
+    }
 }

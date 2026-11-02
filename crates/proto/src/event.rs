@@ -98,6 +98,9 @@ pub enum EventKind {
     MachineInfo,
     /// `reason`, `target`; a fault injection the coordinator declined
     InjectRefused,
+    /// `threads`, `duty_permille`, `duration_ms` (0: until stopped), `on`;
+    /// the artificial CPU load of the load-imbalance demo started or stopped
+    LoadKnob,
 }
 
 impl Event {

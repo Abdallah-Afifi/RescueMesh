@@ -289,9 +289,8 @@ pub async fn run(args: WorkerArgs) -> io::Result<WorkerSummary> {
     {
         let run = run.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                run.end_gen.store(true, Ordering::Relaxed);
-            }
+            crate::stop_signal().await;
+            run.end_gen.store(true, Ordering::Relaxed);
         });
     }
 

@@ -9,11 +9,16 @@
 //! rm-ctl --config config/local.toml silence coordinator --duration-ms 10000
 //! rm-ctl --config config/local.toml silence 2 --duration-ms 5000
 //! rm-ctl --config config/local.toml silence rank1
+//! rm-ctl --config config/local.toml load 2 --threads 8 --duration-ms 30000
+//! rm-ctl --config config/local.toml load 2 --threads 0
 //! ```
 //!
-//! `silence` is sent to the first node that answers (any node accepts it and
-//! forwards it to the coordinator, which commits it as an `INJECT` entry).
-//! `--via N` picks the node. The exit status is 0 only if a node accepted.
+//! `silence` goes to the current coordinator, found with `status`, which
+//! commits it as an `INJECT` entry or says why it declines; if it cannot be
+//! reached, any other node accepts it and forwards it. `--via N` picks the
+//! node. `load` goes to the named node itself: it burns
+//! CPU inside that node's process for the load-imbalance demo (DL-067). The
+//! exit status is 0 only if a node accepted.
 
 use clap::{Parser, Subcommand};
 use proto::NodeId;
@@ -46,6 +51,22 @@ enum Cmd {
         #[arg(long)]
         via: Option<u8>,
     },
+    /// Raise one node's CPU load artificially (load-imbalance demo).
+    Load {
+        /// Node id: 1, 2 or 3.
+        node: u8,
+        /// Burner threads; 0 stops the load. Capped at the node's cores
+        /// minus one. On a machine with many cores, use enough threads to
+        /// move its CPU share noticeably (about 8 or more).
+        #[arg(long)]
+        threads: usize,
+        /// Busy share of each burner thread, in thousandths (capped at 900).
+        #[arg(long, default_value_t = 900)]
+        duty: u16,
+        /// Stop after this many milliseconds; 0 runs until stopped.
+        #[arg(long, default_value_t = 0)]
+        duration_ms: u64,
+    },
 }
 
 /// Sends one command line to `node` and returns its one-line answer.
@@ -72,6 +93,17 @@ fn ask(cfg: &Config, node: NodeId, line: &str) -> Result<String, String> {
         return Err("connection closed without an answer".into());
     }
     Ok(out.trim().to_owned())
+}
+
+/// The coordinator named by the first node that answers `status`.
+fn coordinator(cfg: &Config) -> Option<NodeId> {
+    NodeId::ALL.iter().find_map(|&id| {
+        let s = ask(cfg, id, "status").ok()?;
+        let rest = &s[s.find("\"coordinator\":")? + "\"coordinator\":".len()..];
+        let end = rest.find([',', '}'])?;
+        let n: u8 = rest[..end].trim().parse().ok()?;
+        Some(NodeId(n)).filter(|n| n.is_valid())
+    })
 }
 
 fn valid_target(t: &str) -> bool {
@@ -123,9 +155,18 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             let line = format!("silence {target} {duration_ms}");
+            // Ask the coordinator first: it decides at once and says why if
+            // it declines, while a follower only forwards the request.
             let order: Vec<NodeId> = match via {
                 Some(v) => vec![NodeId(v)],
-                None => NodeId::ALL.to_vec(),
+                None => {
+                    let mut order = NodeId::ALL.to_vec();
+                    if let Some(c) = coordinator(&cfg) {
+                        order.retain(|&n| n != c);
+                        order.insert(0, c);
+                    }
+                    order
+                }
             };
             for id in order {
                 match ask(&cfg, id, &line) {
@@ -133,11 +174,51 @@ fn main() -> ExitCode {
                         println!("{answer}");
                         return ExitCode::SUCCESS;
                     }
+                    // The coordinator declined: asking another node would
+                    // only forward the same request to it and hide the
+                    // refusal behind that node's "ok".
+                    Ok(answer)
+                        if answer.contains("injection refused")
+                            && !answer.contains("no coordinator") =>
+                    {
+                        eprintln!("{id}: {answer}");
+                        return ExitCode::FAILURE;
+                    }
                     Ok(answer) => eprintln!("{id}: {answer}"),
                     Err(e) => eprintln!("{id}: {e}"),
                 }
             }
             ExitCode::FAILURE
+        }
+        Cmd::Load {
+            node,
+            threads,
+            duty,
+            duration_ms,
+        } => {
+            let id = NodeId(node);
+            if !id.is_valid() {
+                eprintln!("node must be 1, 2 or 3");
+                return ExitCode::FAILURE;
+            }
+            if duty > 1000 {
+                eprintln!("duty must be 0..=1000 permille");
+                return ExitCode::FAILURE;
+            }
+            match ask(&cfg, id, &format!("load {threads} {duty} {duration_ms}")) {
+                Ok(answer) if answer.starts_with("ok") => {
+                    println!("{answer}");
+                    ExitCode::SUCCESS
+                }
+                Ok(answer) => {
+                    eprintln!("{id}: {answer}");
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    eprintln!("{id}: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
     }
 }

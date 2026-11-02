@@ -26,6 +26,7 @@ clap.workspace = true
 sysinfo.workspace = true
 # Workstream D: the real state machine and planner rm-node runs.
 incident.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 
 [lints]
 workspace = true

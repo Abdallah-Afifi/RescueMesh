@@ -252,11 +252,12 @@ fn under_faults_and_overload_every_request_gets_one_consistent_answer() {
 /// Workstream D under the same faults: the real planner and state machine on
 /// all three nodes, with competing incidents and scarce responders. Rebuilds
 /// the state from the committed log and checks no responder ever gave out
-/// more units than it had, and no incident got two responders.
+/// more units than it had, never freed units still held, and no incident got
+/// two responders.
 #[test]
 fn the_real_planner_keeps_assignments_consistent_under_faults() {
     use incident::State;
-    use proto::{EntryKind, StateMachine, Write};
+    use proto::{EntryKind, ReqId, StateMachine, Write};
     use std::collections::BTreeMap;
     let seeds = std::env::var("SIM_SEEDS")
         .ok()
@@ -277,9 +278,14 @@ fn the_real_planner_keeps_assignments_consistent_under_faults() {
                 "seed {seed}: committed logs disagree"
             );
         }
+        // Units are tracked in each resource's holds, and pruning drops old
+        // assignments from the state, so the audit keeps its own ledger of
+        // every assignment ever committed.
         let mut state = State::new();
-        let mut capacity = BTreeMap::new();
-        let mut assigned = 0;
+        let mut made: BTreeMap<(ReqId, ReqId), proto::Assignment> = BTreeMap::new();
+        let mut per_incident: BTreeMap<ReqId, u32> = BTreeMap::new();
+        let mut last: BTreeMap<ReqId, proto::ResourceOffer> = BTreeMap::new();
+        let mut latest_ms = 0;
         let (mut results, mut gave_up) = (0usize, 0usize);
         for e in &log {
             if let EntryKind::Result { result, .. } = &e.kind {
@@ -292,33 +298,62 @@ fn the_real_planner_keeps_assignments_consistent_under_faults() {
             if let EntryKind::Result { writes, .. } = &e.kind {
                 for w in writes {
                     match w {
-                        Write::PutResource(r) => {
-                            capacity.insert(r.id, r.capacity);
+                        Write::PutAssignment(a) => {
+                            latest_ms = latest_ms.max(a.created_at_ms);
+                            made.insert((a.incident, a.resource), a.clone());
+                            *per_incident.entry(a.incident).or_default() += 1;
                         }
-                        Write::PutAssignment(_) => assigned += 1,
-                        Write::PutIncident(_) => {}
+                        Write::PutIncident(i) => latest_ms = latest_ms.max(i.reported_at_ms),
+                        Write::PutResource(_) => {}
                     }
+                }
+                for w in writes {
+                    let Write::PutResource(r) = w else { continue };
+                    // Free plus held units are the capacity.
+                    let held: u32 = r.holds.iter().map(|h| h.units).sum();
+                    assert_eq!(r.available + held, r.capacity, "seed {seed}: {}", r.id);
+                    // Every hold is a committed assignment of this resource,
+                    // with its units, and no incident holds it twice.
+                    let mut seen = std::collections::BTreeSet::new();
+                    for h in &r.holds {
+                        assert!(seen.insert(h.incident), "seed {seed}: held twice");
+                        let a = made.get(&(h.incident, r.id));
+                        assert_eq!(a.map(|a| a.units), Some(h.units), "seed {seed}");
+                    }
+                    // A hold is dropped only once expired, so no write frees
+                    // units still in use. The plan's own time is not in the
+                    // log; the latest committed client time bounds it here.
+                    if let Some(prev) = last.get(&r.id) {
+                        for h in prev.holds.iter().filter(|h| !r.holds.contains(h)) {
+                            assert!(
+                                h.expires_at_ms <= latest_ms,
+                                "seed {seed}: {} freed units held until {}",
+                                r.id,
+                                h.expires_at_ms
+                            );
+                        }
+                    }
+                    last.insert(r.id, r.clone());
                 }
             }
             state.apply(e);
         }
         assert!(
-            assigned > 50,
+            made.len() > 50,
             "seed {seed}: the workload must exercise assignment"
         );
+        // Every assignment still running holds its units in the final state,
+        // so no later write gave them out again.
         let snap = state.snapshot();
-        let mut given: BTreeMap<proto::ReqId, u32> = BTreeMap::new();
-        let mut per_incident: BTreeMap<proto::ReqId, u32> = BTreeMap::new();
-        for a in state.assignments().values() {
-            *given.entry(a.resource).or_default() += a.units;
-            *per_incident.entry(a.incident).or_default() += 1;
-        }
-        for (id, (r, _)) in &snap.resources {
-            assert_eq!(
-                given.get(id).copied().unwrap_or(0) + r.available,
-                capacity[id],
-                "seed {seed}"
-            );
+        for ((incident, resource), a) in &made {
+            if a.expires_at_ms > latest_ms
+                && let Some((r, _)) = snap.resources.get(resource)
+            {
+                assert!(
+                    r.holds.iter().any(|h| h.incident == *incident),
+                    "seed {seed}: {resource} lost the hold of {incident}"
+                );
+            }
         }
         assert!(
             per_incident.values().all(|&c| c == 1),
@@ -332,5 +367,64 @@ fn the_real_planner_keeps_assignments_consistent_under_faults() {
             gave_up * 10 <= results,
             "seed {seed}: {gave_up} of {results} requests gave up after re-planning"
         );
+    }
+}
+
+#[test]
+fn missed_heartbeats_are_not_charged_for_a_nodes_own_silence_and_decay_to_zero() {
+    // The reliability term (DL-069): a woken node must not blame its peers
+    // for the heartbeats it dropped itself, and the average must reach 0
+    // again once heartbeats flow (it used to stop at 31 per mille).
+    let mut params = Params::calm(14);
+    params.inject = Some(InjectSchedule {
+        seed: 14,
+        interval_min_ms: 4_000,
+        interval_max_ms: 4_000,
+        duration_min_ms: 2_000,
+        duration_max_ms: 2_000,
+    });
+    let mut sim = started(params);
+    sim.run_until(8_000, "an injection", |s| {
+        NodeId::ALL
+            .iter()
+            .any(|&n| s.count(n, EventKind::InjectStart) > 0)
+    });
+    let victim = NodeId::ALL
+        .into_iter()
+        .find(|&n| sim.count(n, EventKind::InjectStart) > 0)
+        .unwrap();
+    sim.run_until(5_000, "the victim back and active", |s| {
+        !s.nodes[victim.index()].silenced && s.task(victim).core().is_active()
+    });
+    sim.run_for(500);
+    for p in NodeId::ALL.into_iter().filter(|&p| p != victim) {
+        let m = sim.task(victim).missed_permille(p);
+        assert!(
+            m < 50,
+            "{victim} charged {p} with {m} per mille for its own silence"
+        );
+    }
+    // A silent node stops numbering its heartbeats, so its peers see no gap:
+    // the share counts datagrams lost on the way. Lose some, then none, and
+    // the average must come all the way back to 0.
+    for t in sim.nodes.iter_mut() {
+        t.task.pause_injection(true);
+    }
+    sim.params.drop = 0.2;
+    sim.run_for(5_000);
+    let lossy: u32 = NodeId::ALL
+        .iter()
+        .flat_map(|&n| NodeId::ALL.map(|p| (n, p)))
+        .filter(|(n, p)| n != p)
+        .map(|(n, p)| sim.task(n).missed_permille(p))
+        .max()
+        .unwrap();
+    assert!(lossy > 50, "20% loss measured as {lossy} per mille at most");
+    sim.params.drop = 0.0;
+    sim.run_for(40_000);
+    for n in NodeId::ALL {
+        for p in NodeId::ALL.into_iter().filter(|&p| p != n) {
+            assert_eq!(sim.task(n).missed_permille(p), 0, "{n} about {p}");
+        }
     }
 }

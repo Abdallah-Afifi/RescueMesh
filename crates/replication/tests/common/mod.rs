@@ -148,6 +148,11 @@ pub struct Sim {
     pub gave_up: BTreeSet<ReqId>,
     pub events: Vec<(u64, NodeId, EventKind)>,
     pub max_silenced_at_once: usize,
+    /// Log entries carried by `Append`s sent to each node while it was
+    /// silenced, for the replication-overhead check.
+    pub entries_to_silenced: [u64; 3],
+    /// Log entries carried by all `Append`s sent to each node.
+    pub entries_sent: [u64; 3],
 }
 
 impl Sim {
@@ -184,6 +189,8 @@ impl Sim {
             gave_up: BTreeSet::new(),
             events: Vec::new(),
             max_silenced_at_once: 0,
+            entries_to_silenced: [0; 3],
+            entries_sent: [0; 3],
         }
     }
 
@@ -319,6 +326,12 @@ impl Sim {
             match a {
                 Action::Send { to, msg } => {
                     if !self.blocked(n) {
+                        if let NodeMsg::Append { entries, .. } = &msg {
+                            self.entries_sent[to.index()] += entries.len() as u64;
+                            if self.nodes[to.index()].silenced {
+                                self.entries_to_silenced[to.index()] += entries.len() as u64;
+                            }
+                        }
                         self.transmit(Packet::Msg { from: n, to, msg });
                     }
                 }
@@ -405,6 +418,7 @@ impl Sim {
             available: available - 1,
             zone: ZoneId(0),
             expires_at_ms: 0,
+            holds: Vec::new(),
         };
         Proposal {
             req,
@@ -457,6 +471,19 @@ impl Sim {
             .core
             .silence(self.now, target, duration_ms);
         self.process(at, actions);
+    }
+
+    /// Delivers `msg` to `to` at once, as if `from` had sent it; for
+    /// replaying an old message, as the link's retransmission can.
+    pub fn deliver(&mut self, to: NodeId, from: NodeId, msg: NodeMsg) {
+        let now = self.now;
+        let actions = self.nodes[to.index()].core.on_message(now, from, msg);
+        self.process(to, actions);
+    }
+
+    /// What the node runtime does when its transport hears from `peer`.
+    pub fn heard_from(&mut self, at: NodeId, peer: NodeId, when: u64) {
+        self.nodes[at.index()].core.heard_from(peer, when);
     }
 
     pub fn pause_injection(&mut self) {

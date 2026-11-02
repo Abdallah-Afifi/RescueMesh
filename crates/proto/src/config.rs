@@ -97,7 +97,8 @@ impl Default for Timeouts {
             fd_phi_threshold: 8.0,
             fd_min_ms: 300,
             fd_max_ms: 1000,
-            claim_timeout_min_ms: 20,
+            // 3 × the measured node round trip, at least this (DL-075).
+            claim_timeout_min_ms: 5,
             claim_timeout_rtt_multiple: 3,
             candidacy_base_ms: 150,
             candidacy_jitter_ms: 150,
@@ -141,7 +142,9 @@ impl Default for ScoreCfg {
             w_missed: 0,
             w_rtt: 250,
             queue_cap: 64,
-            service_cap_ms: 500,
+            // Plans take 3 to 20 ms at the default cost knob; with a 500 ms
+            // cap this term never moved the score by one step (DL-070).
+            service_cap_ms: 50,
             rtt_cap_ms: 50,
             quantum_permille: 50,
         }
@@ -154,7 +157,10 @@ pub enum RankerKind {
     /// MWBE with scores from heartbeats plus the local correction (primary).
     #[default]
     MwbeCached,
-    /// MWBE with a fresh bid round per request (optional comparison).
+    /// MWBE with a fresh bid round per request (optional comparison). Cut
+    /// for Phase 1 (plan Section 4, first on the cut list): the bid round is
+    /// not implemented, so [`Config::validate`] refuses it rather than run an
+    /// "experiment" identical to `MwbeCached` (DL-070).
     MwbeBids,
     Random,
     Hash,
@@ -290,6 +296,15 @@ impl Config {
                     n.id
                 ));
             }
+            // Sockets bind IPv4 and the heartbeat thread sends to the address
+            // once resolved, so a name that resolves to IPv6 first (macOS
+            // `.local` names often do) would lose every heartbeat silently.
+            if n.host.parse::<std::net::Ipv4Addr>().is_err() {
+                e.push(format!(
+                    "node {} host {:?} must be an IPv4 address such as 10.0.0.11",
+                    n.id, n.host
+                ));
+            }
             if n.port == n.heartbeat_port {
                 e.push(format!(
                     "node {} uses the same port for TCP and heartbeats",
@@ -342,6 +357,13 @@ impl Config {
             + u32::from(s.w_rtt);
         if wsum != 1000 {
             e.push(format!("score weights must sum to 1000 (found {wsum})"));
+        }
+        if self.policy.ranker == RankerKind::MwbeBids {
+            e.push(
+                "policy.ranker = \"mwbe_bids\" is not implemented (the fresh-bid round was cut); \
+                 use mwbe_cached"
+                    .into(),
+            );
         }
         if s.queue_cap == 0 || s.service_cap_ms == 0 || s.rtt_cap_ms == 0 {
             e.push("score caps must be positive".into());
@@ -438,6 +460,16 @@ mod tests {
             panic!("expected invalid")
         };
         assert!(errs.len() >= 4, "{errs:?}");
+    }
+
+    #[test]
+    fn hosts_must_be_ipv4_addresses() {
+        let mut cfg = Config::parse(EXAMPLE).unwrap();
+        cfg.cluster.nodes[0].host = "cloud1.local".into();
+        let Err(ConfigError::Invalid(errs)) = cfg.validate() else {
+            panic!("expected invalid")
+        };
+        assert!(errs.iter().any(|e| e.contains("IPv4")), "{errs:?}");
     }
 
     #[test]

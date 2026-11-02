@@ -225,9 +225,16 @@ impl Selector {
     /// `timeouts.claim_timeout_rtt_multiple`, and at least
     /// `timeouts.claim_timeout_min_ms` (design log DL-024).
     pub fn set_peer_rtt_ms(&mut self, rtt_ms: u64) {
-        self.claim_timeout_ms = self
-            .claim_timeout_min_ms
-            .max(rtt_ms.saturating_mul(self.claim_timeout_rtt_multiple));
+        self.set_peer_rtt_us(rtt_ms.saturating_mul(1000));
+    }
+
+    /// As [`Selector::set_peer_rtt_ms`], in microseconds: a LAN round trip
+    /// is well under a millisecond (DL-069).
+    pub fn set_peer_rtt_us(&mut self, rtt_us: u64) {
+        let scaled_ms = rtt_us
+            .saturating_mul(self.claim_timeout_rtt_multiple)
+            .div_ceil(1000);
+        self.claim_timeout_ms = self.claim_timeout_min_ms.max(scaled_ms);
     }
 
     /// The core applied a new view, or its ACTIVE status changed
@@ -1070,11 +1077,16 @@ pub(crate) mod tests {
     #[test]
     fn claim_timeout_follows_the_peer_rtt() {
         let mut s = node(1, RankerKind::MwbeCached);
-        assert_eq!(s.claim_timeout_ms(), 20);
-        s.set_peer_rtt_ms(4);
-        assert_eq!(s.claim_timeout_ms(), 20, "never below the minimum");
+        assert_eq!(s.claim_timeout_ms(), 5);
+        s.set_peer_rtt_ms(1);
+        assert_eq!(s.claim_timeout_ms(), 5, "never below the minimum");
         s.set_peer_rtt_ms(15);
         assert_eq!(s.claim_timeout_ms(), 45);
+        // A LAN round trip is well under a millisecond (DL-069).
+        s.set_peer_rtt_us(300);
+        assert_eq!(s.claim_timeout_ms(), 5);
+        s.set_peer_rtt_us(2_500);
+        assert_eq!(s.claim_timeout_ms(), 8, "3 × 2.5 ms, rounded up");
     }
 
     // ---------------------------------------------------------- simulation

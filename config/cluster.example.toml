@@ -1,5 +1,6 @@
 # Template for runs on the six physical machines. Copy it, set the cloud
-# machines' addresses and a run_id, and use the same file on every machine.
+# machines' addresses (IPv4 addresses, not host names) and a run_id, and use
+# the same file on every machine. See docs/deployment.md.
 # Every value not shown here takes the agreed default (crates/proto/src/config.rs).
 
 [run]
@@ -33,10 +34,19 @@ fd_max_ms = 1000
 lease_ms = 250
 
 [policy]
-ranker = "mwbe_cached"   # mwbe_bids | random | hash | round_robin | two_choices | highest_id
+ranker = "mwbe_cached"   # random | hash | round_robin | two_choices | highest_id (baselines)
 
 [planner]
 top_k = 100              # cost knob
 
+# Periodic fault injection (spec p. 3, protocol Section 8): the coordinator
+# silences one node, chosen from a hash of the seed and an injection counter,
+# for a random 1-20 s every 45-75 s, and only while all three are ACTIVE.
+# On for the demo. Sweeps set it explicitly: off for controlled `rm-ctl
+# silence` failures, on for experiments/sweeps/autoinject.toml.
 [inject]
-enabled = false
+enabled = true
+interval_min_ms = 45000
+interval_max_ms = 75000
+duration_min_ms = 1000
+duration_max_ms = 20000

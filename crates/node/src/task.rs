@@ -35,13 +35,71 @@ use replication::{Action as CoreAction, Core, CoreCfg};
 use selection::{Action as SelAction, RowState, Selector};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
-/// One request to plan, from a fresh snapshot of committed state.
+/// The newest committed snapshot. The core task publishes it after applying
+/// entries; a planning thread takes it when it starts a job (DL-068), so a
+/// plan reads the freshest state available and a long queue pins no old
+/// copies.
+///
+/// The core publishes a weak reference: holding a strong one here would make
+/// the state copy its whole snapshot at the first write of every batch, even
+/// with no planning thread using it. A planning thread upgrades it; if the
+/// state has just moved its snapshot (a write while nobody held it), the
+/// upgrade fails until the core republishes at the end of that batch, and
+/// the thread waits briefly.
+#[derive(Debug)]
+pub struct SnapshotSlot(Mutex<Published>);
+
+#[derive(Debug)]
+enum Published {
+    /// Owned here; for tests and fixed snapshots.
+    Strong(Arc<Snapshot>),
+    /// The state's own snapshot, published by the core task.
+    Weak(Weak<Snapshot>),
+}
+
+impl SnapshotSlot {
+    pub fn new(snapshot: Arc<Snapshot>) -> Arc<SnapshotSlot> {
+        Arc::new(SnapshotSlot(Mutex::new(Published::Strong(snapshot))))
+    }
+
+    /// The newest snapshot; cheap (one `Arc` clone) except in the brief
+    /// moment while the core applies a batch.
+    pub fn get(&self) -> Arc<Snapshot> {
+        loop {
+            {
+                let p = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                match &*p {
+                    Published::Strong(s) => return Arc::clone(s),
+                    Published::Weak(w) => {
+                        if let Some(s) = w.upgrade() {
+                            return s;
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+    }
+
+    /// Replaces the snapshot with one owned here.
+    pub fn set(&self, snapshot: Arc<Snapshot>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Published::Strong(snapshot);
+    }
+
+    /// Publishes the state's snapshot without keeping it alive.
+    fn publish(&self, snapshot: &Arc<Snapshot>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) =
+            Published::Weak(Arc::downgrade(snapshot));
+    }
+}
+
+/// One request to plan. The snapshot is read when planning starts.
 #[derive(Debug, Clone)]
 pub struct PlanJob {
     pub req: ClientReq,
-    pub snapshot: Arc<Snapshot>,
+    pub snapshot: Arc<SnapshotSlot>,
     /// 0 for the first plan; one more after each `Stale` rejection. The
     /// planner returns `OpResult::Refused`, with no writes and an empty read
     /// set, once this exceeds `timeouts.max_replans`, so the request commits
@@ -100,12 +158,16 @@ struct Executing {
 /// the entries that made the plan stale are never committed.
 const REPLAN_WAIT_MS: u64 = 500;
 
+/// Heartbeats the missed-heartbeat average spans (weight 1/N per heartbeat).
+const MISSED_WINDOW: u32 = 32;
+
 /// The core task of one cloud node.
 pub struct NodeTask {
     id: NodeId,
     core: Core,
     selector: Selector,
     state: Box<dyn StateMachine>,
+    snapshot: Arc<SnapshotSlot>,
     pool: Box<dyn PlanPool>,
     executing: BTreeMap<ReqId, Executing>,
     /// Requests committed with this node as executor whose entry is not yet
@@ -115,6 +177,15 @@ pub struct NodeTask {
     heartbeat_n: u64,
     /// Last heartbeat accepted from each peer: (incarnation, number).
     last_heartbeat: BTreeMap<NodeId, (u32, u64)>,
+    /// Share of each peer's recent heartbeats that never arrived, in parts
+    /// per million: a moving average over about the last [`MISSED_WINDOW`]
+    /// heartbeats, from gaps in their numbers. Kept finer than the
+    /// thousandths it is reported in, so it decays all the way to 0.
+    missed: BTreeMap<NodeId, u32>,
+    /// Peers whose next heartbeat starts a new gap count: this node was
+    /// silenced, and the heartbeats it dropped meanwhile were not the
+    /// peers' fault.
+    rebase_missed: BTreeSet<NodeId>,
     out: Vec<Out>,
 }
 
@@ -162,10 +233,14 @@ impl NodeTask {
         let core = Core::new(id, core_cfg);
         let mut selector = Selector::new(id, policy, score, timeouts);
         selector.set_view(0, core.view().clone(), core.is_active());
+        let snapshot = Arc::new(SnapshotSlot(Mutex::new(Published::Weak(Arc::downgrade(
+            &state.snapshot(),
+        )))));
         NodeTask {
             id,
             core,
             selector,
+            snapshot,
             state,
             pool,
             executing: BTreeMap::new(),
@@ -173,6 +248,8 @@ impl NodeTask {
             incarnation,
             heartbeat_n: 0,
             last_heartbeat: BTreeMap::new(),
+            missed: BTreeMap::new(),
+            rebase_missed: BTreeSet::new(),
             out: Vec::new(),
         }
     }
@@ -191,6 +268,17 @@ impl NodeTask {
     /// Requests this node is planning or has proposed and not yet settled.
     pub fn executing(&self) -> usize {
         self.executing.len()
+    }
+
+    /// This process's incarnation (DL-021), for `rm-ctl status`.
+    pub fn incarnation(&self) -> u32 {
+        self.incarnation
+    }
+
+    /// The transport last heard from `peer` at `at` (ms); see
+    /// `Core::heard_from`.
+    pub fn heard_from(&mut self, peer: NodeId, at: u64) {
+        self.core.heard_from(peer, at);
     }
 
     /// Stop or resume scheduled fault injection (operator control).
@@ -319,22 +407,65 @@ impl NodeTask {
         if hb.version != PROTOCOL_VERSION || hb.from == self.id || !hb.from.is_valid() {
             return;
         }
-        if let Some(&(inc, n)) = self.last_heartbeat.get(&hb.from)
-            && inc == hb.incarnation
-            && hb.n <= n
-        {
-            return;
-        }
+        let gap = match self.last_heartbeat.get(&hb.from) {
+            Some(&(inc, n)) if inc == hb.incarnation => {
+                if hb.n <= n {
+                    return;
+                }
+                hb.n - n - 1
+            }
+            _ => 0,
+        };
+        let gap = if self.rebase_missed.remove(&hb.from) {
+            0
+        } else {
+            gap
+        };
         self.last_heartbeat.insert(hb.from, (hb.incarnation, hb.n));
+        // The reliability term (Section 5.1): each missed heartbeat pulls the
+        // average towards 1000, each received one towards 0. It is measured
+        // but weighted 0 by default, because each node sees its own losses
+        // and rankings would disagree (DL-047).
+        const PPM: u32 = 1_000_000;
+        let m = self.missed.entry(hb.from).or_insert(0);
+        for _ in 0..gap.min(u64::from(MISSED_WINDOW)) {
+            *m = *m - *m / MISSED_WINDOW + PPM / MISSED_WINDOW;
+        }
+        *m -= m.div_ceil(MISSED_WINDOW);
+        let missed = u16::try_from(*m / 1000).unwrap_or(1000);
+        self.selector.set_missed(hb.from, missed);
         self.selector.on_heartbeat(hb.from, hb.load);
     }
 
-    /// The heartbeat to send now; also feeds this node's own load to the
-    /// selector.
+    /// The heartbeat thread sent `hb` to the peers. This node ranks itself
+    /// from the load it carried from now on, the moment its peers start to
+    /// (DL-069). Refreshing its own view when the content was built instead,
+    /// up to a heartbeat interval before the datagram left, made it count
+    /// its claims from a different point than its peers did, and a quarter
+    /// of requests were then claimed twice or waited out a claim timeout.
+    pub fn heartbeat_sent(&mut self, hb: &Heartbeat) {
+        if hb.from == self.id {
+            self.selector.on_heartbeat(self.id, hb.load);
+        }
+    }
+
+    /// The measured round trip between cloud nodes, in microseconds; sets
+    /// the claim timeout (DL-024, DL-069).
+    pub fn set_peer_rtt_us(&mut self, rtt_us: u64) {
+        self.selector.set_peer_rtt_us(rtt_us);
+    }
+
+    /// Missed-heartbeat share of `peer`, in thousandths, for the logs.
+    pub fn missed_permille(&self, peer: NodeId) -> u32 {
+        self.missed.get(&peer).copied().unwrap_or(0) / 1000
+    }
+
+    /// The heartbeat content to hand to the heartbeat thread. The thread
+    /// numbers it, adds round-trip echoes and reports it back once sent
+    /// ([`NodeTask::heartbeat_sent`]).
     pub fn heartbeat(&mut self) -> Heartbeat {
         self.heartbeat_n += 1;
         let load = self.pool.load();
-        self.selector.on_heartbeat(self.id, load);
         Heartbeat {
             version: PROTOCOL_VERSION,
             from: self.id,
@@ -346,6 +477,7 @@ impl NodeTask {
             commit: self.core.commit_seq(),
             applied: self.core.applied_seq(),
             load,
+            echo: Vec::new(),
         }
     }
 
@@ -364,10 +496,21 @@ impl NodeTask {
     }
 
     fn dispatch_core(&mut self, now: u64, actions: Vec<CoreAction>) {
+        let mut applied = false;
         for a in actions {
             match a {
                 CoreAction::Send { to, msg } => self.out.push(Out::Send { to, msg }),
                 CoreAction::Apply(entry) => {
+                    applied = true;
+                    if let EntryKind::View(v) = &entry.kind {
+                        // Every view, not only the batch's last: a node that
+                        // left and rejoined within one batch must count as a
+                        // new member, or its old claims stay valid (DL-046).
+                        let s = self
+                            .selector
+                            .set_view(now, v.clone(), self.core.is_active());
+                        self.dispatch_selection(s);
+                    }
                     self.state.apply(&entry);
                     if let EntryKind::Result { req, result, .. } = &entry.kind {
                         if self.reply_when_applied.remove(req) {
@@ -380,11 +523,23 @@ impl NodeTask {
                     }
                 }
                 CoreAction::ProposeDone { req, outcome } => self.proposal_done(now, req, outcome),
-                CoreAction::SetSilenced(on) => self.out.push(Out::SetSilenced(on)),
+                CoreAction::SetSilenced(on) => {
+                    if !on {
+                        self.rebase_missed =
+                            NodeId::ALL.into_iter().filter(|&n| n != self.id).collect();
+                    }
+                    self.out.push(Out::SetSilenced(on));
+                }
                 CoreAction::Event { kind, req, fields } => {
                     self.out.push(Out::Event { kind, req, fields })
                 }
             }
+        }
+        if applied {
+            // Publish once per batch. The slot holds it weakly, so the state
+            // copies its snapshot at a write only while a planning thread
+            // actually holds the old one.
+            self.snapshot.publish(&self.state.snapshot());
         }
         self.release_replans(now);
         // The view or this node's status may have changed.
@@ -428,7 +583,7 @@ impl NodeTask {
                     if !self.executing.contains_key(&id) {
                         let job = PlanJob {
                             req: req.clone(),
-                            snapshot: self.state.snapshot(),
+                            snapshot: self.snapshot.clone(),
                             attempt: 0,
                         };
                         self.executing.insert(
@@ -479,13 +634,12 @@ impl NodeTask {
         if ready.is_empty() {
             return;
         }
-        let snapshot = self.state.snapshot();
         for id in ready {
             if let Some(ex) = self.executing.get_mut(&id) {
                 ex.replan_at = None;
                 let job = PlanJob {
                     req: ex.req.clone(),
-                    snapshot: snapshot.clone(),
+                    snapshot: self.snapshot.clone(),
                     attempt: ex.attempt,
                 };
                 self.pool.submit(job);
@@ -542,11 +696,22 @@ impl NodeTask {
                     );
                 }
             }
-            // Not in the view: the view change that caused it reaches the
-            // selector, which hands the request on.
-            ProposeOutcome::NotInView | ProposeOutcome::NotCoordinator { .. } => {
-                self.executing.remove(&req);
+            // Not in the coordinator's view. If this node's own applied view
+            // no longer holds it either, the selector has handed the request
+            // on, so drop it. If it does, the view change that excluded this
+            // node may still be uncommitted and be discarded by a new
+            // coordinator, leaving the request claimed by this node: dropping
+            // it would strand it, so plan it again after the usual wait.
+            ProposeOutcome::NotInView => {
+                if !self.core.view().contains(self.id) {
+                    self.executing.remove(&req);
+                } else if let Some(ex) = self.executing.get_mut(&req) {
+                    ex.proposed = None;
+                    ex.replan_at = Some((proto::Seq(u64::MAX), now + REPLAN_WAIT_MS));
+                }
             }
+            // Never final: the core retries at the hinted coordinator.
+            ProposeOutcome::NotCoordinator { .. } => {}
         }
     }
 }

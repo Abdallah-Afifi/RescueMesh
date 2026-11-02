@@ -44,7 +44,7 @@ use proto::{
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
@@ -56,6 +56,14 @@ pub const OPERATOR_PREAMBLE: &[u8; 4] = b"RMO1";
 /// Replies queued per client connection before new ones are dropped (the
 /// client retries).
 const CLIENT_QUEUE: usize = 8_192;
+
+/// Client requests waiting for the core task before new ones are refused
+/// with `Busy` at once, without reaching the core (DL-067, DL-075). About a
+/// tenth of a second of the core's work. The client sent the same request
+/// to the other two nodes, so a backlogged node simply takes no part, as
+/// when its planning queue is full; the `Busy` tells the client so instead
+/// of leaving it to time out.
+pub const CLIENT_BACKLOG: usize = 1_024;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -72,6 +80,9 @@ impl Clock {
     }
     pub fn now_ms(&self) -> u64 {
         self.0.elapsed().as_millis() as u64
+    }
+    pub fn now_us(&self) -> u64 {
+        self.0.elapsed().as_micros() as u64
     }
 }
 
@@ -90,6 +101,10 @@ pub enum Input {
     },
     Client(ClientReq),
     Heartbeat(Heartbeat),
+    /// The heartbeat thread sent this heartbeat to the peers just now. The
+    /// node ranks itself from the load it carried, starting at the same
+    /// moment as its peers do (DL-069).
+    HeartbeatSent(Heartbeat),
     /// The failure detector changed its opinion of `peer`.
     Suspect {
         peer: NodeId,
@@ -108,6 +123,15 @@ pub enum OpCmd {
     Status(Sender<String>),
     Silence {
         target: SilenceTarget,
+        duration_ms: u64,
+        reply: Sender<String>,
+    },
+    /// The artificial load knob (load-imbalance demo): burn CPU on
+    /// `threads` threads at `duty_permille`, for `duration_ms` (0: until
+    /// stopped). `threads == 0` stops it.
+    Load {
+        threads: usize,
+        duty_permille: u16,
         duration_ms: u64,
         reply: Sender<String>,
     },
@@ -131,6 +155,40 @@ pub struct NetStats {
     pub version_errors: AtomicU64,
     /// Inbound frames or datagrams dropped because this node was silenced.
     pub dropped_silenced: AtomicU64,
+    /// Client requests dropped because [`CLIENT_BACKLOG`] were waiting.
+    pub client_overload_dropped: AtomicU64,
+    /// New peer messages sent, by protocol role, for the overhead
+    /// measurements; link retransmissions and bare acks are counted by the
+    /// link. Election: `PreVote`, `PreVoteReply`, `Election`, `Vote`,
+    /// `Coordinator`.
+    pub msgs_tx_election: AtomicU64,
+    /// `Append`, `AppendAck`.
+    pub msgs_tx_replication: AtomicU64,
+    pub msgs_tx_claim: AtomicU64,
+    /// `Propose`, `ProposeReply`.
+    pub msgs_tx_commit: AtomicU64,
+    /// `Join`, `Silence`, `Ack`.
+    pub msgs_tx_other: AtomicU64,
+    /// Smoothed round trip to each peer in microseconds, measured from
+    /// heartbeat echoes (DL-069); 0 until measured. Indexed by node index.
+    pub peer_rtt_us: [AtomicU64; 3],
+}
+
+impl NetStats {
+    fn count_sent(&self, msg: &NodeMsg) {
+        let c = match msg {
+            NodeMsg::PreVote { .. }
+            | NodeMsg::PreVoteReply { .. }
+            | NodeMsg::Election { .. }
+            | NodeMsg::Vote { .. }
+            | NodeMsg::Coordinator { .. } => &self.msgs_tx_election,
+            NodeMsg::Append { .. } | NodeMsg::AppendAck { .. } => &self.msgs_tx_replication,
+            NodeMsg::Claim { .. } => &self.msgs_tx_claim,
+            NodeMsg::Propose(_) | NodeMsg::ProposeReply { .. } => &self.msgs_tx_commit,
+            NodeMsg::Join { .. } | NodeMsg::Silence { .. } | NodeMsg::Ack => &self.msgs_tx_other,
+        };
+        add(c, 1);
+    }
 }
 
 fn add(c: &AtomicU64, n: u64) {
@@ -142,6 +200,8 @@ struct PeerLink {
     addr: String,
     link: Mutex<Link>,
     cv: Condvar,
+    /// When an envelope from this peer was last accepted ([`Clock`] ms).
+    last_rx: AtomicU64,
 }
 
 struct Clients {
@@ -159,7 +219,9 @@ pub struct Net {
     stats: NetStats,
     peers: BTreeMap<NodeId, Arc<PeerLink>>,
     clients: Clients,
-    core: Mutex<Sender<Input>>,
+    /// Client requests handed to the core task and not yet handled by it.
+    client_backlog: AtomicUsize,
+    core: Sender<Input>,
     local: SocketAddr,
 }
 
@@ -192,6 +254,7 @@ impl Net {
                     addr: format!("{}:{}", n.host, n.port),
                     link: Mutex::new(Link::new(me, incarnation, lcfg.clone())),
                     cv: Condvar::new(),
+                    last_rx: AtomicU64::new(0),
                 };
                 (n.id, Arc::new(p))
             })
@@ -208,7 +271,8 @@ impl Net {
                 conns: Mutex::new(HashMap::new()),
                 route: Mutex::new(HashMap::new()),
             },
-            core: Mutex::new(core),
+            client_backlog: AtomicUsize::new(0),
+            core,
             local,
         });
         {
@@ -253,13 +317,33 @@ impl Net {
         s
     }
 
+    /// When the transport last accepted an envelope from `peer` ([`Clock`]
+    /// ms; 0 if never). Feeds the coordinator lease (DL-066).
+    pub fn last_heard(&self, peer: NodeId) -> u64 {
+        self.peers
+            .get(&peer)
+            .map_or(0, |p| p.last_rx.load(Ordering::Relaxed))
+    }
+
+    /// The core task took one client request off its queue.
+    pub fn client_dequeued(&self) {
+        let _ = self
+            .client_backlog
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+    }
+
+    /// Client requests waiting for the core task.
+    pub fn client_backlog(&self) -> usize {
+        self.client_backlog.load(Ordering::Relaxed)
+    }
+
     /// Unacknowledged messages to `peer`, fillers included.
     pub fn unacked(&self, peer: NodeId) -> usize {
         self.peers.get(&peer).map_or(0, |p| lock(&p.link).unacked())
     }
 
     fn to_core(&self, i: Input) {
-        let _ = lock(&self.core).send(i);
+        let _ = self.core.send(i);
     }
 
     // ------------------------------------------------------------ outbound API
@@ -271,6 +355,7 @@ impl Net {
             return;
         }
         if let Some(p) = self.peers.get(&to) {
+            self.stats.count_sent(&msg);
             lock(&p.link).push(msg);
             p.cv.notify_one();
         }
@@ -278,9 +363,10 @@ impl Net {
 
     /// Answers the client that sent `req`. Dropped while silenced, or if the
     /// client's connection is gone or backed up (the client retries).
-    pub fn reply(&self, req: ReqId, body: ReplyBody) {
+    /// Returns whether the reply was queued for sending.
+    pub fn reply(&self, req: ReqId, body: ReplyBody) -> bool {
         if self.is_silenced() {
-            return;
+            return false;
         }
         let conn = lock(&self.clients.route).get(&req.client).copied();
         let tx = conn.and_then(|c| lock(&self.clients.conns).get(&c).cloned());
@@ -300,6 +386,7 @@ impl Net {
             },
             1,
         );
+        sent
     }
 
     /// The fault-injection switch (protocol Section 8).
@@ -405,7 +492,11 @@ impl Net {
 
     fn accept_loop(self: Arc<Self>, listener: TcpListener) {
         for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+            let Ok(stream) = stream else {
+                // Out of file descriptors or a similar error: don't spin.
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            };
             let net = self.clone();
             let _ = thread::Builder::new()
                 .name("conn".into())
@@ -465,7 +556,8 @@ impl Net {
                 continue;
             }
             let now = self.clock.now_ms();
-            let body = lock(&p.link).on_receive(&env, now);
+            p.last_rx.fetch_max(now, Ordering::Relaxed);
+            let body = lock(&p.link).on_receive(env, now);
             p.cv.notify_one(); // an acknowledgment may now be owed
             if let Some(msg) = body {
                 self.to_core(Input::Peer { from, msg });
@@ -516,6 +608,12 @@ impl Net {
                 Ok(ClientMsg::Req(req)) => {
                     add(&self.stats.client_reqs, 1);
                     lock(&self.clients.route).insert(req.req.id.client, id);
+                    if self.client_backlog.load(Ordering::Relaxed) >= CLIENT_BACKLOG {
+                        add(&self.stats.client_overload_dropped, 1);
+                        self.reply(req.req.id, ReplyBody::Busy);
+                        continue;
+                    }
+                    self.client_backlog.fetch_add(1, Ordering::Relaxed);
                     self.to_core(Input::Client(req));
                 }
                 Ok(ClientMsg::Reply(_)) => {}
@@ -525,10 +623,12 @@ impl Net {
         lock(&self.clients.conns).remove(&id);
     }
 
-    /// Operator commands, one per line (`rm-ctl`):
-    /// `status`, or `silence <1|2|3|coordinator|rank1> <duration_ms>`.
-    /// Answered even while silenced, so the demo can watch a silenced node;
-    /// a silenced node refuses `silence`.
+    /// Operator commands, one per line (`rm-ctl`): `status`,
+    /// `silence <1|2|3|coordinator|rank1> <duration_ms>`, or
+    /// `load <threads> <duty_permille> <duration_ms>` (the load knob of this
+    /// node; 0 threads stops it, 0 ms means until stopped). Answered even
+    /// while silenced, so the demo can watch a silenced node; a silenced node
+    /// refuses `silence`.
     fn serve_operator<R: Read>(&self, stream: &TcpStream, r: R) {
         let Ok(mut w) = stream.try_clone() else {
             return;
@@ -559,6 +659,22 @@ impl Net {
                 }
                 OpCmd::Silence {
                     target,
+                    duration_ms,
+                    reply: tx,
+                }
+            }
+            ["load", threads, duty, ms] => {
+                let (Ok(threads), Ok(duty_permille), Ok(duration_ms)) =
+                    (threads.parse(), duty.parse(), ms.parse())
+                else {
+                    return format!("error: bad load arguments {line:?}");
+                };
+                if duty_permille > 1000 {
+                    return "error: duty must be 0..=1000 permille".into();
+                }
+                OpCmd::Load {
+                    threads,
+                    duty_permille,
                     duration_ms,
                     reply: tx,
                 }

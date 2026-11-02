@@ -26,6 +26,11 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub applied: Seq,
+    /// The clients' time as committed: the median client timestamp of the
+    /// recent entries that carried one, 0 before any. Planners keep a
+    /// request's own timestamp near it, so one client's clock cannot decide
+    /// when units come back or what has expired.
+    pub clients_now_ms: u64,
     pub incidents: BTreeMap<IncidentId, (Incident, Version)>,
     pub resources: BTreeMap<ResourceId, (ResourceOffer, Version)>,
     pub assignments: BTreeMap<(IncidentId, ResourceId), Assignment>,
@@ -57,7 +62,9 @@ pub trait Planner: Send + Sync {
 pub trait StateMachine: Send {
     /// Entries arrive in `seq` order with no gaps.
     fn apply(&mut self, entry: &Entry);
-    /// Cheap: returns a shared, immutable copy for planning threads.
+    /// Cheap: returns a shared, immutable copy for planning threads. Must
+    /// be a clone of the `Arc` the state keeps, not a new allocation: the
+    /// node publishes it to planning threads by a weak reference (DL-073).
     fn snapshot(&self) -> Arc<Snapshot>;
     fn version_of(&self, resource: ResourceId) -> Option<Version>;
     fn applied(&self) -> Seq;

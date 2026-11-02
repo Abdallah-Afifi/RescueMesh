@@ -22,13 +22,25 @@
 //! **Peer restarts.** A heartbeat with a new incarnation from a peer means
 //! its process restarted; the transport then restarts its stream to that
 //! peer ([`crate::link::Link::peer_restarted`]).
+//!
+//! **After sending,** the thread hands the heartbeat back to the core task
+//! ([`Input::HeartbeatSent`]), so the node starts ranking itself from that
+//! load when its peers start ranking it from the same datagram, not up to an
+//! interval earlier when the content was refreshed (DL-069).
+//!
+//! **Round trips.** Each heartbeat echoes, for every peer, the number of the
+//! last heartbeat received from it and how long it was held. A node that
+//! gets its own number back computes `now − sent − held`: the network round
+//! trip, measured on its own clock only and unaffected by planning load. The
+//! smoothed value goes to [`crate::net::NetStats::peer_rtt_us`]; it sets the
+//! claim timeout and is logged per second.
 
 use crate::fd::{FdCfg, PhiDetector};
 use crate::net::{Clock, Input, Net};
 use proto::codec;
 use proto::config::Config;
-use proto::{Heartbeat, NodeId, PROTOCOL_VERSION};
-use std::collections::BTreeMap;
+use proto::{Echo, Heartbeat, NodeId, PROTOCOL_VERSION};
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::Sender;
@@ -42,12 +54,19 @@ pub type HeartbeatSlot = Arc<Mutex<Option<Heartbeat>>>;
 /// How often the thread wakes to check detectors and receive.
 const POLL: Duration = Duration::from_millis(5);
 
+/// Send times of this many recent heartbeats are kept to match echoes.
+const SENT_KEPT: usize = 64;
+
 struct Peer {
     host: String,
     port: u16,
     addr: Option<SocketAddr>,
     fd: PhiDetector,
     incarnation: Option<u32>,
+    /// The last heartbeat number received from this peer, and when (µs).
+    last_rx: Option<(u64, u64)>,
+    /// Smoothed round trip in µs (weight 1/8 on each new sample).
+    rtt_us: Option<u64>,
 }
 
 pub fn spawn(
@@ -79,6 +98,8 @@ pub fn spawn(
                     addr: None,
                     fd: PhiDetector::new(fdcfg.clone(), now),
                     incarnation: None,
+                    last_rx: None,
+                    rtt_us: None,
                 },
             )
         })
@@ -107,6 +128,7 @@ fn run(
     let mut next_send = clock.now_ms();
     let mut was_silenced = false;
     let mut buf = [0u8; 2 * codec::MAX_DATAGRAM];
+    let mut sent: VecDeque<(u64, u64)> = VecDeque::with_capacity(SENT_KEPT);
     loop {
         let now = clock.now_ms();
         let silenced = net.is_silenced();
@@ -123,6 +145,21 @@ fn run(
             if let (false, Some(mut hb)) = (silenced, hb) {
                 n += 1;
                 hb.n = n;
+                let now_us = clock.now_us();
+                hb.echo = peers
+                    .iter()
+                    .filter_map(|(&to, p)| {
+                        p.last_rx.map(|(n, at)| Echo {
+                            to,
+                            n,
+                            held_us: u32::try_from(now_us.saturating_sub(at)).unwrap_or(u32::MAX),
+                        })
+                    })
+                    .collect();
+                if sent.len() == SENT_KEPT {
+                    sent.pop_front();
+                }
+                sent.push_back((n, now_us));
                 match codec::encode_datagram(format, &hb) {
                     Ok(bytes) => {
                         for p in peers.values_mut() {
@@ -141,6 +178,9 @@ fn run(
                         }
                     }
                     Err(e) => eprintln!("{me}: cannot encode heartbeat: {e}"),
+                }
+                if core.send(Input::HeartbeatSent(hb)).is_err() {
+                    return;
                 }
             }
             next_send += interval;
@@ -161,6 +201,19 @@ fn run(
                     } else if let Some(p) = peers.get_mut(&hb.from) {
                         stats.heartbeats_rx.fetch_add(1, ORD);
                         let now = clock.now_ms();
+                        let now_us = clock.now_us();
+                        p.last_rx = Some((hb.n, now_us));
+                        let echoed = hb.echo.iter().find(|e| e.to == me).and_then(|e| {
+                            sent.iter()
+                                .find(|&&(n, _)| n == e.n)
+                                .map(|&(_, at)| (at, e.held_us))
+                        });
+                        if let Some((at, held)) = echoed {
+                            let sample = now_us.saturating_sub(at).saturating_sub(u64::from(held));
+                            let rtt = p.rtt_us.map_or(sample, |r| r - r / 8 + sample / 8);
+                            p.rtt_us = Some(rtt);
+                            stats.peer_rtt_us[hb.from.index()].store(rtt.max(1), ORD);
+                        }
                         if p.incarnation.is_some_and(|i| i != hb.incarnation) {
                             net.peer_restarted(hb.from);
                         }

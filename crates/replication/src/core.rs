@@ -166,6 +166,10 @@ struct Leader {
     matched: [u64; 3],
     sent_up_to: [u64; 3],
     last_ack: [u64; 3],
+    /// Since when each peer has acknowledged without a gap of more than two
+    /// heartbeat intervals; reset when it answers again after a gap, e.g.
+    /// when it wakes from a silence. 0 for a peer never seen unresponsive.
+    responsive_since: [u64; 3],
     last_send: [u64; 3],
     /// Commit position last sent to each peer.
     commit_sent: [u64; 3],
@@ -188,6 +192,11 @@ struct Leader {
 struct Outstanding {
     proposal: Proposal,
     last_sent: Option<u64>,
+    /// Where it was last sent, and how many times. The link delivers it
+    /// to a coordinator that stays in place, so resends back off; a new
+    /// coordinator gets it at once (DL-075).
+    sent_to: Option<NodeId>,
+    sends: u32,
 }
 
 /// Replication, election, membership and fault injection for one node.
@@ -221,7 +230,15 @@ pub struct Core {
     last_join_sent: Option<u64>,
 
     suspected: [bool; 3],
+    /// When the transport last received anything from each peer (runtime
+    /// clock, ms); feeds the coordinator lease ([`Core::heard_from`]).
+    heard: [u64; 3],
     silenced_until: Option<u64>,
+    /// After waking, until this time the node stays SYNCING and keeps raising
+    /// its catch-up target to the highest commit position any `Append`
+    /// carries: the first `Append` after waking may be one the link
+    /// retransmits from before the silence, with an old commit position.
+    sync_window_until: Option<u64>,
     /// Injection counter of the current silence, for the `inject_end` event.
     silence_k: Option<u64>,
     rank1_hint: Option<NodeId>,
@@ -284,7 +301,9 @@ impl Core {
             catch_up_to: Some(0),
             last_join_sent: None,
             suspected: [false; 3],
+            heard: [0; 3],
             silenced_until: None,
+            sync_window_until: None,
             silence_k: None,
             rank1_hint: None,
             inject_paused: false,
@@ -318,6 +337,12 @@ impl Core {
     pub fn is_silenced(&self) -> bool {
         self.silenced_until.is_some()
     }
+    /// Peers this node's failure detector currently suspects.
+    pub fn suspected_peers(&self) -> Vec<NodeId> {
+        peers_of(self.id)
+            .filter(|p| self.suspected[p.index()])
+            .collect()
+    }
     pub fn view(&self) -> &View {
         &self.view
     }
@@ -344,6 +369,16 @@ impl Core {
         self.rank1_hint = node;
     }
 
+    /// The transport received something from `peer` at `at` (ms, same
+    /// clock as `now`). Keeps the coordinator lease alive while the peer's
+    /// acknowledgments wait in the input queue behind other work.
+    pub fn heard_from(&mut self, peer: NodeId, at: u64) {
+        if peer != self.id && peer.is_valid() && self.silenced_until.is_none() {
+            let h = &mut self.heard[peer.index()];
+            *h = (*h).max(at);
+        }
+    }
+
     /// Stop or resume scheduled injections (operator control and tests).
     pub fn pause_injection(&mut self, paused: bool) {
         self.inject_paused = paused;
@@ -361,6 +396,10 @@ impl Core {
                 return Vec::new();
             }
             self.wake(now);
+        }
+        if self.sync_window_until.is_some_and(|t| now >= t) {
+            self.sync_window_until = None;
+            self.update_status();
         }
         if self.role == Role::Coordinator {
             self.leader_tick(now);
@@ -398,6 +437,8 @@ impl Core {
             Outstanding {
                 proposal,
                 last_sent: None,
+                sent_to: None,
+                sends: 0,
             },
         );
         if self.silenced_until.is_none() {
@@ -761,6 +802,7 @@ impl Core {
             matched: [0; 3],
             sent_up_to: [last; 3],
             last_ack: [now; 3],
+            responsive_since: [0; 3],
             last_send: [0; 3],
             commit_sent: [0; 3],
             req_index,
@@ -792,6 +834,7 @@ impl Core {
             .collect();
         members.push(self.id);
         self.catch_up_to = Some(self.commit);
+        self.sync_window_until = None;
         self.append(now, EntryKind::View(View::new(log_view.no.next(), members)));
     }
 
@@ -801,8 +844,13 @@ impl Core {
         let Some(l) = self.leader.as_ref() else {
             return;
         };
+        // The lease counts any traffic the transport received from a peer,
+        // not only acknowledgments the core has processed: under overload
+        // an acknowledgment can wait in the core's input queue for longer
+        // than the lease, and a coordinator that steps down for that reason
+        // stalls commits for nothing (DL-066).
         let freshest = peers_of(self.id)
-            .map(|p| l.last_ack[p.index()])
+            .map(|p| l.last_ack[p.index()].max(self.heard[p.index()]))
             .max()
             .unwrap_or(now);
         if now.saturating_sub(freshest) > self.cfg.lease_ms {
@@ -810,22 +858,42 @@ impl Core {
             return;
         }
         for p in peers_of(self.id) {
-            let commit = self.commit;
-            let due = self.leader.as_ref().is_some_and(|l| {
-                let i = p.index();
-                now >= l.last_send[i] + self.cfg.heartbeat_ms
-                    || (l.commit_sent[i] < commit
-                        && now >= l.last_send[i] + self.cfg.commit_flush_ms)
-            });
-            if due {
-                // Also retransmits anything not yet acknowledged.
+            let i = p.index();
+            let l = self.leader.as_ref().expect("coordinator");
+            let heartbeat_due = now >= l.last_send[i] + self.cfg.heartbeat_ms;
+            if self.responsive(l, p, now) {
+                // Entries already sent are delivered by the link, which
+                // retransmits until they are acknowledged (DL-054); only what
+                // was never sent goes now. If anything was lost, the next
+                // `Append` fails the log-matching check and the refusal
+                // repairs the gap.
+                let flush_due = l.commit_sent[i] < self.commit
+                    && now >= l.last_send[i] + self.cfg.commit_flush_ms;
+                if heartbeat_due || flush_due {
+                    self.send_append(now, p);
+                }
+            } else if heartbeat_due {
+                // A silent peer gets an empty probe each heartbeat interval
+                // instead of the same batch of entries every commit flush
+                // (DL-066). The probe sits where the peer's log is believed
+                // to end (`next − 1`), not at `matched`: a new coordinator
+                // starts with `matched = 0`, and a probe at 0 always matches,
+                // which would resend the whole log to a woken peer. If the
+                // guess is wrong, the refusal's hint moves it back. The first
+                // acknowledgment restarts the catch-up, one batch per round
+                // trip.
                 let l = self.leader.as_mut().expect("coordinator");
-                l.sent_up_to[p.index()] = l.next[p.index()] - 1;
-                self.send_append(now, p);
+                l.sent_up_to[i] = l.next[i] - 1;
+                self.send_append_upto(now, p, 0);
             }
         }
         self.maintain_view(now);
         self.maybe_inject(now);
+    }
+
+    /// Has `p` acknowledged an `Append` within two heartbeat intervals?
+    fn responsive(&self, l: &Leader, p: NodeId, now: u64) -> bool {
+        now.saturating_sub(l.last_ack[p.index()]) <= 2 * self.cfg.heartbeat_ms
     }
 
     fn view_change_pending(&self) -> bool {
@@ -886,8 +954,10 @@ impl Core {
         }
         self.log.entries.push(entry);
         for p in peers_of(self.id) {
+            // Stream to peers that are keeping up. A silent one gets probes
+            // from `leader_tick` until it answers (DL-066).
             let l = self.leader.as_ref().expect("coordinator");
-            if l.sent_up_to[p.index()] + 1 == seq {
+            if l.sent_up_to[p.index()] + 1 == seq && self.responsive(l, p, now) {
                 self.send_append(now, p);
             }
         }
@@ -897,13 +967,16 @@ impl Core {
 
     /// Send `p` the entries after what it has been sent so far.
     fn send_append(&mut self, now: u64, p: NodeId) {
+        self.send_append_upto(now, p, self.cfg.append_batch);
+    }
+
+    /// Send `p` at most `max` entries after what it has been sent so far;
+    /// with `max == 0`, an empty `Append` that carries the commit position.
+    fn send_append_upto(&mut self, now: u64, p: NodeId, max: usize) {
         let i = p.index();
         let l = self.leader.as_mut().expect("coordinator");
         let from = l.sent_up_to[i] + 1;
-        let to = self
-            .log
-            .last_seq()
-            .min(from + self.cfg.append_batch as u64 - 1);
+        let to = self.log.last_seq().min(from + max as u64 - 1);
         let prev_seq = from - 1;
         let prev_epoch = self
             .log
@@ -945,6 +1018,9 @@ impl Core {
         let last = self.log.last_seq();
         let i = from.index();
         let l = self.leader.as_mut().expect("coordinator");
+        if now.saturating_sub(l.last_ack[i]) > 2 * self.cfg.heartbeat_ms {
+            l.responsive_since[i] = now;
+        }
         l.last_ack[i] = now;
         if ok {
             let m = match_seq.min(last);
@@ -1063,18 +1139,25 @@ impl Core {
                 }
                 self.reply_proposal(from, p.req, outcome);
             } else {
-                let w = Waiter {
-                    node: from,
-                    req: p.req,
-                    executor: p.executor,
-                };
-                self.leader
+                // A resend of a proposal already waiting for its commit adds
+                // no second waiter, so the outcome is sent once (DL-075).
+                let waiters = self
+                    .leader
                     .as_mut()
                     .expect("coordinator")
                     .waiters
                     .entry(seq)
-                    .or_default()
-                    .push(w);
+                    .or_default();
+                if !waiters
+                    .iter()
+                    .any(|w| w.node == from && w.req == p.req && w.executor == p.executor)
+                {
+                    waiters.push(Waiter {
+                        node: from,
+                        req: p.req,
+                        executor: p.executor,
+                    });
+                }
             }
             return;
         }
@@ -1154,8 +1237,9 @@ impl Core {
             self.follow(now, epoch, from);
         }
         self.last_coordinator_contact = now;
-        if self.catch_up_to.is_none() {
-            self.catch_up_to = Some(leader_commit);
+        let in_window = self.sync_window_until.is_some_and(|t| now < t);
+        if self.catch_up_to.is_none() || in_window {
+            self.catch_up_to = Some(self.catch_up_to.unwrap_or(0).max(leader_commit));
         }
 
         let last = self.log.last_seq();
@@ -1197,6 +1281,11 @@ impl Core {
             self.commit = new_commit;
             self.apply_committed(now);
         }
+        // A node that woke from a short silence learns its catch-up target
+        // from this `Append`. If it has already applied that much, it is
+        // current now, whether or not the commit position moved: on an idle
+        // cluster it may never move (DL-066).
+        self.update_status();
         self.send(
             from,
             NodeMsg::AppendAck {
@@ -1269,7 +1358,8 @@ impl Core {
     }
 
     fn update_status(&mut self) {
-        let current = self.catch_up_to.is_some_and(|w| self.applied >= w);
+        let current =
+            self.sync_window_until.is_none() && self.catch_up_to.is_some_and(|w| self.applied >= w);
         let status = if self.view.contains(self.id) && current {
             Status::Active
         } else {
@@ -1307,11 +1397,15 @@ impl Core {
         match self.coordinator {
             Some(c) if c == self.id && self.role == Role::Coordinator => {
                 o.last_sent = Some(now);
+                o.sends = if o.sent_to == Some(c) { o.sends + 1 } else { 1 };
+                o.sent_to = Some(c);
                 let p = o.proposal.clone();
                 self.handle_propose(now, self.id, p);
             }
             Some(c) if c != self.id => {
                 o.last_sent = Some(now);
+                o.sends = if o.sent_to == Some(c) { o.sends + 1 } else { 1 };
+                o.sent_to = Some(c);
                 let p = o.proposal.clone();
                 self.send(c, NodeMsg::Propose(p));
             }
@@ -1319,13 +1413,21 @@ impl Core {
         }
     }
 
+    /// Resends proposals still unanswered: at once to a new coordinator,
+    /// otherwise after `propose_retry_ms`, doubling with each resend to the
+    /// same coordinator up to 16 times that. Resending every proposal every
+    /// 200 ms to an overloaded coordinator multiplied its work and kept it
+    /// overloaded after the load stopped (DL-075).
     fn resend_proposals(&mut self, now: u64) {
+        let coordinator = self.coordinator;
+        let base = self.cfg.propose_retry_ms;
         let due: Vec<ReqId> = self
             .outstanding
             .iter()
-            .filter(|(_, o)| {
-                o.last_sent
-                    .is_none_or(|t| now >= t + self.cfg.propose_retry_ms)
+            .filter(|(_, o)| match o.last_sent {
+                None => true,
+                Some(_) if coordinator.is_some() && o.sent_to != coordinator => true,
+                Some(t) => now >= t + (base << o.sends.saturating_sub(1).min(4)),
             })
             .map(|(r, _)| *r)
             .collect();
@@ -1344,6 +1446,8 @@ impl Core {
                 && h != self.id
             {
                 o.last_sent = Some(now);
+                o.sends = if o.sent_to == Some(h) { o.sends + 1 } else { 1 };
+                o.sent_to = Some(h);
                 let p = o.proposal.clone();
                 self.send(h, NodeMsg::Propose(p));
             }
@@ -1375,8 +1479,12 @@ impl Core {
         self.candidacy_at = None;
         self.last_coordinator_contact = now;
         // Stay SYNCING until the commit position learned from the current
-        // coordinator has been applied.
+        // coordinator has been applied. The target is taken from every
+        // `Append` in the first two heartbeat intervals, which contain at
+        // least one sent after the wake (a probe, or a flush), so a stale
+        // retransmitted one cannot end the catch-up early (DL-066).
         self.catch_up_to = None;
+        self.sync_window_until = Some(now + 2 * self.cfg.heartbeat_ms);
         self.update_status();
     }
 
@@ -1394,6 +1502,20 @@ impl Core {
             Some("not all nodes in view")
         } else if self.suspected.iter().any(|&s| s) {
             Some("a node is suspected")
+        } else if peers_of(self.id).any(|p| !self.responsive(l, p, now)) {
+            Some("a node is not responding")
+        } else if peers_of(self.id).any(|p| {
+            let since = l.responsive_since[p.index()];
+            since > 0 && now < since + self.cfg.inject_margin_ms
+        }) {
+            // All three must be ACTIVE before the next silence (Section 8).
+            // A peer that just came back may still be catching up. This is
+            // kept per peer here, not only as the time the last injection
+            // ended, because a new coordinator does not know that time
+            // (DL-074).
+            Some("a node rejoined recently")
+        } else if peers_of(self.id).any(|p| l.matched[p.index()] < l.log_view_seq) {
+            Some("a node has not caught up with the view")
         } else if self.view_change_pending() {
             Some("view change in progress")
         } else if now < l.inject_busy_until {

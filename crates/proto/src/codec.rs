@@ -275,6 +275,18 @@ mod tests {
                 cpu_permille: 1000,
                 service_ewma_us: u32::MAX,
             },
+            echo: vec![
+                crate::msg::Echo {
+                    to: NodeId(1),
+                    n: u64::MAX,
+                    held_us: u32::MAX,
+                },
+                crate::msg::Echo {
+                    to: NodeId(2),
+                    n: u64::MAX,
+                    held_us: u32::MAX,
+                },
+            ],
         };
         for format in [WireFormat::Postcard, WireFormat::Json] {
             let b = encode_datagram(format, &hb).unwrap();
