@@ -1,0 +1,71 @@
+# Failover and recovery under light, medium and heavy load: the rank-1 node
+# or the coordinator is silenced for 10 s, 15 s into a 50 s measured window.
+#
+#   python experiments/run_sweep.py experiments/sweeps/failure.toml --machines experiments/machines.toml
+#
+# analyze.py reports per injection: failover time (p99 back in band),
+# detection, committed VIEW removal, recovery (end of silence to ACTIVE),
+# retried requests, and the before/during/after table; one timeline figure per
+# injection.
+#
+# 2 targets x 3 loads x 5 seeds = 30 runs of about 105 s:
+# ESTIMATED WALL-CLOCK TIME ABOUT 55 min.
+# Keep the load levels equal to three of latency.toml's, so the "before"
+# numbers can be checked against the failure-free runs.
+name = "failure"
+base_config = "config/cluster.toml"
+seeds = [1, 2, 3, 4, 5]
+warmup_secs = 10
+duration_secs = 50
+drain_secs = 10
+settle_secs = 3
+x_name = "offered load during a 10 s silence (ops/s)"
+
+[loadgen]
+processes = 4
+users = 50
+mode = "open"
+mix = "report=60,offer=20,update=15,query=5"
+
+[config]
+# Controlled failures only: the base config turns periodic injection on for the demo.
+"inject.enabled" = false
+"policy.ranker" = "mwbe_cached"
+
+[[run]]
+label = "rank1-r200"
+series = "silence rank1"
+x = 200
+loadgen = { rate = 200 }
+failure = [{ at_s = 15, target = "rank1", duration_ms = 10000 }]
+[[run]]
+label = "rank1-r500"
+series = "silence rank1"
+x = 500
+loadgen = { rate = 500 }
+failure = [{ at_s = 15, target = "rank1", duration_ms = 10000 }]
+[[run]]
+label = "rank1-r1000"
+series = "silence rank1"
+x = 1000
+loadgen = { rate = 1000 }
+failure = [{ at_s = 15, target = "rank1", duration_ms = 10000 }]
+
+[[run]]
+label = "coord-r200"
+series = "silence coordinator"
+x = 200
+loadgen = { rate = 200 }
+failure = [{ at_s = 15, target = "coordinator", duration_ms = 10000 }]
+[[run]]
+label = "coord-r500"
+series = "silence coordinator"
+x = 500
+loadgen = { rate = 500 }
+failure = [{ at_s = 15, target = "coordinator", duration_ms = 10000 }]
+[[run]]
+label = "coord-r1000"
+series = "silence coordinator"
+x = 1000
+loadgen = { rate = 1000 }
+failure = [{ at_s = 15, target = "coordinator", duration_ms = 10000 }]

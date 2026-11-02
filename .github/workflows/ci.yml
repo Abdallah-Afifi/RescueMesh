@@ -17,3 +17,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"   # 3.11+ is required (tomllib)
+          cache: pip
+      - name: Install the analysis requirements
+        run: pip install -r requirements.txt
+      - name: Analysis and runner tests
+        run: python -m pytest analysis experiments -q

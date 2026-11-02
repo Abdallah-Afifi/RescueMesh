@@ -1,6 +1,9 @@
 # Example sweep: latency and throughput against offered load, with a failure
-# injected in every run. Run:
+# injected in every run. The sweeps for the report are in experiments/sweeps/
+# (latency, clients, failure, imbalance, autoinject); this file is kept as a
+# short template. 20 runs of about 2 min: ESTIMATED WALL-CLOCK TIME ABOUT 40 min.
 #   python experiments/run_sweep.py experiments/example-sweep.toml
+#   python experiments/run_sweep.py experiments/example-sweep.toml --local --stub   # one machine
 name = "load"
 base_config = "config/cluster.example.toml"
 seeds = [1, 2, 3, 4, 5]          # at least five per configuration (protocol Section 10)
@@ -22,6 +25,11 @@ target = "rank1"                  # node id, "coordinator" or "rank1"
 duration_ms = 10000
 
 # rate = total offered load across all client machines, operations per second.
+
+[config]
+# Controlled failures only: the base config turns periodic injection on for the demo.
+"inject.enabled" = false
+
 [[run]]
 label = "mwbe-r200"
 series = "mwbe_cached"

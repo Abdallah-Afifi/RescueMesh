@@ -1,0 +1,97 @@
+# Load-metric ablation: MWBE with each score term alone against the chosen
+# equal weights (DL-024, DL-047), at a medium and a heavy open-loop load.
+# This is the measured support for the weights. The same variants under an
+# induced imbalance are in imbalance.toml.
+#
+#   python experiments/run_sweep.py experiments/sweeps/weights.toml --machines experiments/machines.toml
+#
+# Weights are in thousandths and must sum to 1000 (Config::validate); the
+# missed-heartbeat term stays 0 (DL-047). Each variant is a series, with load
+# on the x axis.
+#
+# 5 variants x 2 loads x 5 seeds = 50 runs of about 85 s: ESTIMATED WALL-CLOCK TIME ABOUT 1 h 10 min.
+name = "weights"
+base_config = "config/cluster.toml"
+seeds = [1, 2, 3, 4, 5]
+warmup_secs = 10
+duration_secs = 30
+drain_secs = 5
+settle_secs = 3
+x_name = "offered load (ops/s), MWBE weight variants"
+
+[loadgen]
+processes = 4
+users = 50
+mode = "open"
+mix = "report=60,offer=20,update=15,query=5"
+
+[config]
+"policy.ranker" = "mwbe_cached"
+"score.w_missed" = 0
+# Controlled failures only: the base config turns periodic injection on for the demo.
+"inject.enabled" = false
+
+[[run]]
+label = "equal-r500"
+series = "equal (250 each)"
+x = 500
+loadgen = { rate = 500 }
+config = { "score.w_queue" = 250, "score.w_cpu" = 250, "score.w_service" = 250, "score.w_rtt" = 250 }
+[[run]]
+label = "equal-r1000"
+series = "equal (250 each)"
+x = 1000
+loadgen = { rate = 1000 }
+config = { "score.w_queue" = 250, "score.w_cpu" = 250, "score.w_service" = 250, "score.w_rtt" = 250 }
+
+[[run]]
+label = "queueonly-r500"
+series = "queue only"
+x = 500
+loadgen = { rate = 500 }
+config = { "score.w_queue" = 1000, "score.w_cpu" = 0, "score.w_service" = 0, "score.w_rtt" = 0 }
+[[run]]
+label = "queueonly-r1000"
+series = "queue only"
+x = 1000
+loadgen = { rate = 1000 }
+config = { "score.w_queue" = 1000, "score.w_cpu" = 0, "score.w_service" = 0, "score.w_rtt" = 0 }
+
+[[run]]
+label = "cpuonly-r500"
+series = "CPU only"
+x = 500
+loadgen = { rate = 500 }
+config = { "score.w_queue" = 0, "score.w_cpu" = 1000, "score.w_service" = 0, "score.w_rtt" = 0 }
+[[run]]
+label = "cpuonly-r1000"
+series = "CPU only"
+x = 1000
+loadgen = { rate = 1000 }
+config = { "score.w_queue" = 0, "score.w_cpu" = 1000, "score.w_service" = 0, "score.w_rtt" = 0 }
+
+[[run]]
+label = "serviceonly-r500"
+series = "service time only"
+x = 500
+loadgen = { rate = 500 }
+config = { "score.w_queue" = 0, "score.w_cpu" = 0, "score.w_service" = 1000, "score.w_rtt" = 0 }
+[[run]]
+label = "serviceonly-r1000"
+series = "service time only"
+x = 1000
+loadgen = { rate = 1000 }
+config = { "score.w_queue" = 0, "score.w_cpu" = 0, "score.w_service" = 1000, "score.w_rtt" = 0 }
+
+[[run]]
+label = "rttonly-r500"
+series = "client RTT only"
+x = 500
+loadgen = { rate = 500 }
+config = { "score.w_queue" = 0, "score.w_cpu" = 0, "score.w_service" = 0, "score.w_rtt" = 1000 }
+[[run]]
+label = "rttonly-r1000"
+series = "client RTT only"
+x = 1000
+loadgen = { rate = 1000 }
+config = { "score.w_queue" = 0, "score.w_cpu" = 0, "score.w_service" = 0, "score.w_rtt" = 1000 }

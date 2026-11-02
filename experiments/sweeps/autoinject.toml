@@ -1,0 +1,48 @@
+# Automatic fault injection (`[inject] enabled = true`, DL-011, DL-025): the
+# elected coordinator picks a victim and a duration from hash(seed, k) and
+# silences it, again and again. Here the interval is 30-40 s and the silence
+# 3-10 s, so a 100 s measured window holds 2-3 injections (the first comes
+# 30-40 s after the coordinator is elected, about 22 s before the window opens).
+#
+#   python experiments/run_sweep.py experiments/sweeps/autoinject.toml --machines experiments/machines.toml
+#
+# Nothing is scheduled by the runner; analyze.py finds every injection from the
+# victims' inject_start/inject_end events and reports each one (failures.csv,
+# injection_phases.csv, one timeline per injection), plus elections per minute
+# and the false-suspicion rate over the whole run.
+#
+# 2 loads x 5 seeds = 10 runs of about 155 s: ESTIMATED WALL-CLOCK TIME ABOUT 26 min.
+name = "autoinject"
+base_config = "config/cluster.toml"
+seeds = [1, 2, 3, 4, 5]
+warmup_secs = 10
+duration_secs = 100
+drain_secs = 10
+settle_secs = 3
+x_name = "offered load with automatic injection (ops/s)"
+
+[loadgen]
+processes = 4
+users = 50
+mode = "open"
+mix = "report=60,offer=20,update=15,query=5"
+
+[config]
+"policy.ranker" = "mwbe_cached"
+"inject.enabled" = true
+"inject.interval_min_ms" = 30000   # must exceed duration_max_ms (Config::validate)
+"inject.interval_max_ms" = 40000
+"inject.duration_min_ms" = 3000
+"inject.duration_max_ms" = 10000
+
+[[run]]
+label = "auto-r200"
+series = "auto inject"
+x = 200
+loadgen = { rate = 200 }
+
+[[run]]
+label = "auto-r1000"
+series = "auto inject"
+x = 1000
+loadgen = { rate = 1000 }

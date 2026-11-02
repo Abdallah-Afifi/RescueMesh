@@ -1,11 +1,19 @@
 # Copy to machines.toml and fill in. Every machine needs password-less ssh,
-# the repository built with `cargo build --release`, and chrony running.
+# the repository at the same commit built with `cargo build --release`, and
+# chrony running. run_sweep.py checks all of this before a sweep starts.
 repo_dir = "~/RescueMesh"          # path of the checkout on every machine
-ssh_opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+# The runner always adds ConnectTimeout, ServerAliveInterval and
+# ServerAliveCountMax if they are missing, so a dead link cannot hang a sweep.
+ssh_opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"]
 
+# The cloud hosts must be the node hosts of the cluster config (config/cluster.toml).
+# If ssh reaches a machine by another name (an alias in ~/.ssh/config), give
+# the address the cluster config uses as `addr`.
 [[cloud]]
 id = 1
-ssh = "user@10.0.0.11"             # same hosts as config/cluster.example.toml
+ssh = "user@10.0.0.11"
+# addr = "10.0.0.11"
 [[cloud]]
 id = 2
 ssh = "user@10.0.0.12"
@@ -13,6 +21,7 @@ ssh = "user@10.0.0.12"
 id = 3
 ssh = "user@10.0.0.13"
 
+# clients[0] (machine 1) also runs rm-ctl, and its clock times the run.
 [[client]]
 machine = 1
 ssh = "user@10.0.0.21"

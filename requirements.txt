@@ -1,0 +1,9 @@
+# Python packages for analysis/ and experiments/ (the runner itself needs only
+# the standard library). Python 3.11 or newer is required (tomllib). These pins
+# were tested with Python 3.14; CI uses 3.13.
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+numpy==2.5.4
+pandas==3.1.0
+scipy==1.18.1
+matplotlib==3.11.2
+pytest==9.2.0

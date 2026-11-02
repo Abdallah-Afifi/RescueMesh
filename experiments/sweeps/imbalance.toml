@@ -1,0 +1,78 @@
+# Induced load imbalance: a CPU burner (`rm-ctl load`) runs inside node 2 for
+# 20 s in the middle of the measured window; MWBE against hash, and MWBE
+# with each score term alone (the weights ablation of weights.toml under an
+# induced imbalance: which term sees a CPU burner?).
+#
+#   python experiments/run_sweep.py experiments/sweeps/imbalance.toml --machines experiments/machines.toml
+#
+# analyze.py draws figures/imbalance_<run>.png (each node's share of completed
+# plans per second, with the knob's on/off times, CPU and queue length) and
+# tables/imbalance.csv (node 2's share before, during and after). Under MWBE
+# node 2's share should drop while the knob is on and come back after; under
+# hash it should not move, and node 2's latency should suffer instead.
+#
+# threads = "cores" starts one burner thread per core of node 2's machine
+# (about 8 or more are needed to move the MWBE score by one step on a
+# many-core machine); duty 900 = busy 90% of each period. The knob stops by
+# itself after duration_ms.
+#
+# 6 configurations x 5 seeds = 30 runs of about 115 s: ESTIMATED WALL-CLOCK TIME ABOUT 1 h
+# (MWBE against hash only: `--only -knob` is not enough, use `--only mwbe-knob` and `--only hash-knob`).
+name = "imbalance"
+base_config = "config/cluster.toml"
+seeds = [1, 2, 3, 4, 5]
+warmup_secs = 10
+duration_secs = 60
+drain_secs = 5
+settle_secs = 3
+x_name = "policy under induced imbalance"
+
+[loadgen]
+processes = 4
+users = 50
+mode = "open"
+rate = 500
+mix = "report=60,offer=20,update=15,query=5"
+
+[load_knob]
+at_s = 20
+node = 2
+threads = "cores"
+duty = 900
+duration_ms = 20000
+
+
+[config]
+# Controlled failures only: the base config turns periodic injection on for the demo.
+"inject.enabled" = false
+
+[[run]]
+label = "mwbe-knob"
+series = "mwbe_cached"
+config = { "policy.ranker" = "mwbe_cached" }
+
+[[run]]
+label = "hash-knob"
+series = "hash"
+config = { "policy.ranker" = "hash" }
+
+# MWBE weight variants under the same knob (weights must sum to 1000).
+[[run]]
+label = "mwbe-queueonly-knob"
+series = "MWBE queue only"
+config = { "policy.ranker" = "mwbe_cached", "score.w_queue" = 1000, "score.w_cpu" = 0, "score.w_service" = 0, "score.w_rtt" = 0, "score.w_missed" = 0 }
+
+[[run]]
+label = "mwbe-cpuonly-knob"
+series = "MWBE CPU only"
+config = { "policy.ranker" = "mwbe_cached", "score.w_queue" = 0, "score.w_cpu" = 1000, "score.w_service" = 0, "score.w_rtt" = 0, "score.w_missed" = 0 }
+
+[[run]]
+label = "mwbe-serviceonly-knob"
+series = "MWBE service time only"
+config = { "policy.ranker" = "mwbe_cached", "score.w_queue" = 0, "score.w_cpu" = 0, "score.w_service" = 1000, "score.w_rtt" = 0, "score.w_missed" = 0 }
+
+[[run]]
+label = "mwbe-rttonly-knob"
+series = "MWBE client RTT only"
+config = { "policy.ranker" = "mwbe_cached", "score.w_queue" = 0, "score.w_cpu" = 0, "score.w_service" = 0, "score.w_rtt" = 1000, "score.w_missed" = 0 }

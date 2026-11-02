@@ -1,0 +1,186 @@
+# Latency against offered load: MWBE against every baseline, open loop, 5 seeds.
+#
+#   python experiments/run_sweep.py experiments/sweeps/latency.toml --machines experiments/machines.toml
+#   python analysis/analyze.py results/raw --out results/summary
+#
+# 6 policies x 4 loads x 5 seeds = 120 runs of about 85 s (10 s warm-up + 30 s
+# measured + 5 s drain + about 40 s start-up, readiness, stop and log copy):
+# ESTIMATED WALL-CLOCK TIME ABOUT 2 h 50 min. Seeds are the outer loop, so after
+# about 35 min every configuration has one seed; `--seeds 1,2` or `--only mwbe`
+# cut it down, and rerunning the same command resumes.
+#
+# Open loop: the offered load does not slow down when the system does, so the
+# latency curve has no coordinated omission (DL-043). `rate` is the total over
+# all client machines. Calibrate the levels first: the highest one should be
+# near saturation (see clients.toml), the lowest well below it. Each run has
+# 30 s x rate measured requests, so 5 seeds give 30,000 or more per configuration
+# from 200 ops/s up.
+name = "latency"
+base_config = "config/cluster.toml"
+seeds = [1, 2, 3, 4, 5]
+warmup_secs = 10
+duration_secs = 30
+drain_secs = 5
+settle_secs = 3
+x_name = "offered load (ops/s)"
+
+[loadgen]
+processes = 4
+users = 50
+mode = "open"
+mix = "report=60,offer=20,update=15,query=5"
+
+
+[config]
+# Controlled failures only: the base config turns periodic injection on for the demo.
+"inject.enabled" = false
+
+[[run]]
+label = "mwbe-r200"
+series = "mwbe_cached"
+x = 200
+config = { "policy.ranker" = "mwbe_cached" }
+loadgen = { rate = 200 }
+[[run]]
+label = "mwbe-r500"
+series = "mwbe_cached"
+x = 500
+config = { "policy.ranker" = "mwbe_cached" }
+loadgen = { rate = 500 }
+[[run]]
+label = "mwbe-r1000"
+series = "mwbe_cached"
+x = 1000
+config = { "policy.ranker" = "mwbe_cached" }
+loadgen = { rate = 1000 }
+[[run]]
+label = "mwbe-r1500"
+series = "mwbe_cached"
+x = 1500
+config = { "policy.ranker" = "mwbe_cached" }
+loadgen = { rate = 1500 }
+
+[[run]]
+label = "random-r200"
+series = "random"
+x = 200
+config = { "policy.ranker" = "random" }
+loadgen = { rate = 200 }
+[[run]]
+label = "random-r500"
+series = "random"
+x = 500
+config = { "policy.ranker" = "random" }
+loadgen = { rate = 500 }
+[[run]]
+label = "random-r1000"
+series = "random"
+x = 1000
+config = { "policy.ranker" = "random" }
+loadgen = { rate = 1000 }
+[[run]]
+label = "random-r1500"
+series = "random"
+x = 1500
+config = { "policy.ranker" = "random" }
+loadgen = { rate = 1500 }
+
+[[run]]
+label = "hash-r200"
+series = "hash"
+x = 200
+config = { "policy.ranker" = "hash" }
+loadgen = { rate = 200 }
+[[run]]
+label = "hash-r500"
+series = "hash"
+x = 500
+config = { "policy.ranker" = "hash" }
+loadgen = { rate = 500 }
+[[run]]
+label = "hash-r1000"
+series = "hash"
+x = 1000
+config = { "policy.ranker" = "hash" }
+loadgen = { rate = 1000 }
+[[run]]
+label = "hash-r1500"
+series = "hash"
+x = 1500
+config = { "policy.ranker" = "hash" }
+loadgen = { rate = 1500 }
+
+[[run]]
+label = "roundrobin-r200"
+series = "round_robin"
+x = 200
+config = { "policy.ranker" = "round_robin" }
+loadgen = { rate = 200 }
+[[run]]
+label = "roundrobin-r500"
+series = "round_robin"
+x = 500
+config = { "policy.ranker" = "round_robin" }
+loadgen = { rate = 500 }
+[[run]]
+label = "roundrobin-r1000"
+series = "round_robin"
+x = 1000
+config = { "policy.ranker" = "round_robin" }
+loadgen = { rate = 1000 }
+[[run]]
+label = "roundrobin-r1500"
+series = "round_robin"
+x = 1500
+config = { "policy.ranker" = "round_robin" }
+loadgen = { rate = 1500 }
+
+[[run]]
+label = "twochoices-r200"
+series = "two_choices"
+x = 200
+config = { "policy.ranker" = "two_choices" }
+loadgen = { rate = 200 }
+[[run]]
+label = "twochoices-r500"
+series = "two_choices"
+x = 500
+config = { "policy.ranker" = "two_choices" }
+loadgen = { rate = 500 }
+[[run]]
+label = "twochoices-r1000"
+series = "two_choices"
+x = 1000
+config = { "policy.ranker" = "two_choices" }
+loadgen = { rate = 1000 }
+[[run]]
+label = "twochoices-r1500"
+series = "two_choices"
+x = 1500
+config = { "policy.ranker" = "two_choices" }
+loadgen = { rate = 1500 }
+
+[[run]]
+label = "highestid-r200"
+series = "highest_id"
+x = 200
+config = { "policy.ranker" = "highest_id" }
+loadgen = { rate = 200 }
+[[run]]
+label = "highestid-r500"
+series = "highest_id"
+x = 500
+config = { "policy.ranker" = "highest_id" }
+loadgen = { rate = 500 }
+[[run]]
+label = "highestid-r1000"
+series = "highest_id"
+x = 1000
+config = { "policy.ranker" = "highest_id" }
+loadgen = { rate = 1000 }
+[[run]]
+label = "highestid-r1500"
+series = "highest_id"
+x = 1500
+config = { "policy.ranker" = "highest_id" }
+loadgen = { rate = 1500 }

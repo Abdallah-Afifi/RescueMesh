@@ -19,3 +19,13 @@ __pycache__/
 
 # Word and Docs lock files
 ~$*
+
+# Run configurations written by experiments/run_sweep.py and demo state
+/runs/
+
+# Local, per-site files: made from the .example files (docs/deployment.md)
+# and tool scratch directories
+.pytest_cache/
+.claude/worktrees/
+/config/cluster.toml
+/experiments/machines.toml
