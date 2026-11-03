@@ -812,3 +812,30 @@ Entries DL-066 to DL-070 record the fixes from the pre-deployment review of 2026
   - Evidence (5-minute soak at 600 requests/s after the change): p99 latency held at 11.6–12.8 ms every minute (it had climbed from 11 to 24–30 ms), and p50 went from 3.3 to 4.8 ms.
   - Known limit: plan time still grows with the number of live resources, from 0.15 ms to about 1 ms over 5 minutes at 36,000 resources, because each plan regroups every live resource by kind and zone. It levels off once offers start expiring (lease 300 s plus 60 s of slack); node memory and CPU level off with it. Sixty-second sweep runs restart the nodes and never get there.
   - Phase 2 fix: keep that grouping inside the snapshot, updated as resources are written, instead of rebuilding it for every plan.
+
+## DL-076. Sweeps and the demo without ssh: a shared timetable
+
+- Date: 2026-11-03. Status: agreed. Owner: Abdallah.
+- Problem: the university lab's six machines (Ubuntu 24.04, wired, one subnet, about 3 ms round trip) have no ssh server, and a university account has no sudo, so none can be installed. `run_sweep.py` and the ssh mode of `demo.sh` start every program over ssh, so neither can run there.
+- Decision:
+  - `experiments/lab_run.py` computes a timetable from the sweep files, the lab config and an agreed start time. Every machine gets the same timetable, checked by a printed id. Each machine runs its own role's part by itself:
+    - the cloud roles start and stop `rm-node` in each slot;
+    - the client roles start `rm-loadgen` with the slot's shared start time;
+    - client1 also checks that the cluster is ready and sends the run's scheduled silences and load-knob changes with `rm-ctl`.
+  - Nothing travels between the machines but the cluster's own traffic. The machines' synchronized clocks (systemd-timesyncd) keep them in step, as `--start-at-ms` already did for the load generators.
+  - `pack` bundles each machine's logs. `collect` merges the six bundles into run folders with the same `meta.json` as `run_sweep.py`, so the analysis is unchanged. A run with missing logs, a cluster that was not ready, or a failed scheduled action goes to `_failed`.
+  - The lab config (`config/lab.toml`) is kept in git, so all six machines get the same file with `git pull`.
+  - `lab_run.py check` reports, per machine:
+    - its role, commit and clock synchronization;
+    - whether its binaries are older than their own sources (cargo's dep-info);
+    - whether a cloud role's address matches the config.
+  - For the demo, `lab_run.py demo` starts each machine's part, and `demo.sh --attach` watches the cluster and drives the scenarios with `rm-ctl` only.
+  - Alongside: the load generator's frontend now passes SIGTERM on to its worker processes; a stop signal used to reach only the frontend, so workers with no end time ran on.
+- Alternatives:
+  - an ssh server run as the user: it isn't installed, and unpacking it from Ubuntu's package is fragile;
+  - asking the lab to install one: requested, but not in time;
+  - starting each run by hand on six machines: hundreds of coordinated starts for the full sweeps.
+- Limits:
+  - A slot's timing is fixed, not adaptive: a run that needs longer than its slot is cut at the slot's end.
+  - A machine that misses its start skips the runs already begun, and `collect` reports them as missing.
+- Evidence: all six roles run as separate processes on one machine with the smoke sweep, then pack, collect and analyse: the silences, the load knob and the recovery were all measured, as with `run_sweep.py`. `demo.sh --attach` ran scenarios 1–4 against hand-started roles. `experiments/test_lab_run.py` covers the timetable's determinism and non-overlap, placeholder addresses, and collection (including a run parked because its cluster was not ready).

@@ -7,6 +7,8 @@ run by hand:
     demo_helper.py [--local | --machines M] [--base-config C] <command> ...
 
     setup [--auto-inject]        kill strays, write the demo config, start 3 nodes, wait until ready
+    attach                       use a cluster started by hand (lab_run.py demo on each machine, no
+                                 ssh): rm-ctl from this computer with --base-config, nothing started
     load --rate R [--secs S] [--tag T] start open-loop load on every client machine (background;
                                  --secs 0, the default, runs until `stop`)
     watch --secs S [--mark N]    one line per second: plans/s per node (from `plans` deltas), share,
@@ -69,7 +71,7 @@ class Ctl:
         self.cfg = state["config"]
         local_bin = Path("target/release/rm-ctl")
         self.local = state["local"] or local_bin.exists()
-        self.host = clients[0]
+        self.host = clients[0] if clients else None
 
     def run(self, args: str, timeout=20) -> subprocess.CompletedProcess:
         if self.local:
@@ -351,9 +353,26 @@ def cmd_preflight(args):
     return 0
 
 
+def cmd_attach(args):
+    cfg = base_path(args)
+    if not Path("target/release/rm-ctl").exists():
+        sys.exit("attach needs target/release/rm-ctl on this computer: cargo build --release")
+    state = {"local": True, "machines": None, "config": str(cfg), "run_id": "attached", "nodes": [], "loads": [],
+             "auto_inject": False, "attached": True}
+    save(state)
+    st = Ctl(state, [], []).status()
+    ok, why = rs.cluster_ready(st)
+    print(f"attached to {cfg}: {'ready' if ok else 'NOT ready'} ({why})")
+    return 0 if ok else 1
+
+
 def cmd_stop(args):
     if not STATE.exists():
         print("nothing to stop")
+        return 0
+    if json.loads(STATE.read_text()).get("attached"):
+        STATE.unlink()
+        print("attached cluster: stop the nodes and the load on each machine with Ctrl-C")
         return 0
     state, cloud, clients, _ = ctx(args)
     by_id = {i: h for i, h in enumerate(cloud, start=1)}
@@ -377,6 +396,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("setup")
     p.add_argument("--auto-inject", action="store_true")
     p.add_argument("--top-k", type=int, help="planner cost knob for the demo (default: the config's)")
+    sub.add_parser("attach")
     p = sub.add_parser("preflight")
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--allow-clock-skew", action="store_true")
@@ -403,7 +423,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if shutil.which("ssh") is None and not args.local:
         sys.exit("ssh is needed for the six-machine demo")
-    return {"setup": cmd_setup, "load": cmd_load, "watch": cmd_watch, "status": cmd_status, "ctl": cmd_ctl,
+    return {"setup": cmd_setup, "attach": cmd_attach, "load": cmd_load, "watch": cmd_watch, "status": cmd_status, "ctl": cmd_ctl,
             "coordinator": cmd_coordinator, "silenced": cmd_silenced, "recovery": cmd_recovery,
             "preflight": cmd_preflight, "stop": cmd_stop}[args.cmd](args)
 

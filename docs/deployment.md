@@ -1,5 +1,7 @@
 # Running on the six machines
 
+If the machines have no ssh server (the university lab), sections 1–4 still apply; then follow section 10 instead of 5–8.
+
 How to set up the Phase 1 test environment the project description asks for (pp. 2, 4): three machines run the cloud nodes, three run the client frontends with many simulated users. A seventh computer, usually a laptop, is the controller that starts runs and collects logs; it can be one of the six. The steps take about an hour the first time.
 
 | Machine | Runs | Inbound ports |
@@ -233,3 +235,75 @@ On machines with many cores, pass `--knob-threads` of about the cloud machine's 
 | `core_lag_ms_max` above about 100 (the analysis warns), or `client_overload_dropped` rising | That node is overloaded; that run is past the saturation point. |
 | A node keeps getting suspected on Wi-Fi | Use the Wi-Fi timeouts (section 1), or move to a wired network. |
 | `._*.jsonl` files in collected logs | macOS `tar` metadata; set `COPYFILE_DISABLE=1` (the runner does). |
+
+## 10. The university lab: no ssh between the machines
+
+The lab machines run Ubuntu without an ssh server, and a university account has no sudo, so `run_sweep.py` and the ssh mode of `demo.sh` cannot start programs on them. Everything else works unchanged: the nodes and clients talk over TCP 7000 and UDP 7100, and `rm-ctl` uses TCP 7000. `experiments/lab_run.py` replaces ssh with a shared timetable. The clocks are synchronized, so each machine runs its own part of the same timetable by itself (DL-076).
+
+### Once per machine (homes are local, so all six)
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . ~/.cargo/env
+git clone https://github.com/Abdallah-Afifi/RescueMesh.git ~/RescueMesh
+cd ~/RescueMesh && cargo build --release
+```
+
+Write down each machine's primary IP (`ip addr show enp0s31f6`, the `inet` line that is not `secondary`) and choose the roles: cloud1–3 and client1–3, with the three cloud machines next to each other if they differ.
+
+### The lab config, through git
+
+On your laptop, put the three cloud IPs into `config/lab.toml`, then commit and push. On each lab machine:
+
+```sh
+cd ~/RescueMesh && git pull && cargo build --release
+```
+
+The timetable depends on this file, so all six must have the same one. `lab_run.py check` prints a timetable id that differs if they don't.
+
+### A measuring session
+
+1. **Pick a start time 10 minutes ahead**, so you can walk to all six machines, for example `--start 18:30`. Use the same sweeps, `--start` and options on every machine.
+2. **On each machine, check:**
+   ```sh
+   cd ~/RescueMesh && python3 experiments/lab_run.py check --role cloud1 --config config/lab.toml --start 18:30 experiments/sweeps/smoke.toml
+   ```
+   It prints the commit, whether the clock is synchronized, the number of cores, the run count and end time, and a **timetable id**. The commit and the id must be the same on all six. For a cloud role, it also checks that this machine's IP is the one in the config.
+3. **On each machine, start its part.** Use the same command with `run`, in a terminal you leave open; lock the screen, don't log out. Or detach it:
+   ```sh
+   nohup python3 experiments/lab_run.py run --role cloud1 --config config/lab.toml --start 18:30 experiments/sweeps/smoke.toml > ~/lab-run.log 2>&1 &
+   ```
+   Several sweeps can go in one timetable, one after the other: list them all, the same on every machine.
+4. **Leave it.** Each run's slot is: nodes start; the load begins 10 s later; warm-up, measured window, drain; the nodes stop; the next run starts 4 s later. client1 checks just before the load that the cluster is ready, and sends that run's scheduled silences and load-knob changes with `rm-ctl`. A machine started late skips the slots already begun.
+5. **Afterwards, pack each machine's logs:**
+   ```sh
+   python3 experiments/lab_run.py pack --role cloud1 --config config/lab.toml --start 18:30 experiments/sweeps/smoke.toml
+   ```
+   This writes `~/rescuemesh-cloud1-<id>.tgz`. Bring the six files to your laptop: on a USB stick, or over the network while no nodes are running. On each machine, run `cd ~ && python3 -m http.server 7000`; then on the laptop, `curl -O http://<ip>:7000/rescuemesh-<role>-<id>.tgz`.
+6. **On your laptop, collect and analyse:**
+   ```sh
+   python3 experiments/lab_run.py collect --config config/lab.toml --start 18:30 --from rescuemesh-*.tgz --out results/raw experiments/sweeps/smoke.toml
+   python3 analysis/analyze.py results/raw --out results/summary
+   ```
+   `collect` writes each run as `results/raw/<sweep>/<run>` with a `meta.json`, as `run_sweep.py` does. A run with missing logs, a cluster that was not ready, or a failed scheduled action goes to `<sweep>/_failed/` with the reason. Rerun those in a later session with `--only` and `--seeds`.
+
+**Order of sessions.**
+1. The smoke sweep, about 1 minute, to see everything work.
+2. A short calibration session (`clients.toml` and `latency.toml` with `--seeds 1`) to find where these machines saturate. Adjust the load levels in the sweep files, then commit and pull.
+3. The report's sweeps, as long sessions: `check` prints the end time of each timetable.
+
+### The demo without ssh
+
+On each machine, in a terminal (Ctrl-C stops it):
+
+```sh
+python3 experiments/lab_run.py demo --role cloud1 --config config/lab.toml        # cloud2, cloud3 likewise
+python3 experiments/lab_run.py demo --role client1 --config config/lab.toml --rate 50   # client2, client3
+```
+
+Then, on the presenting computer:
+
+```sh
+experiments/demo.sh --attach --config config/lab.toml --pause --knob-threads 20
+```
+
+That computer can be your laptop, if `nc -vz <cloud ip> 7000` works from it, or any lab machine; the demo needs only Python 3.11+, no packages. It watches the cluster and drives scenarios 1–4 with `rm-ctl`. For scenario 5, it tells you to restart the three cloud roles with `--auto-inject`. In attach mode, the load burst of scenario 1 is skipped, because only the client machines can start load.

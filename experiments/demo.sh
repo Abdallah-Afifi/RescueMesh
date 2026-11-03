@@ -8,6 +8,9 @@
 #
 # Options:
 #   --local               start three nodes and one client on localhost (config/local.toml)
+#   --attach              the lab without ssh: the nodes and load were started on each machine
+#                         with `lab_run.py demo --role ...`; this only watches and sends rm-ctl
+#                         (needs --config, the lab cluster config; the load burst is skipped)
 #   --machines FILE       machines file (default experiments/machines.toml)
 #   --config FILE         cluster config (default config/cluster.toml, or config/local.toml with --local)
 #   --pause               "press Enter to continue" before each scenario
@@ -36,12 +39,13 @@
 set -u
 cd "$(dirname "$0")/.."
 PYTHON=${PYTHON:-python3}
-LOCAL=0; MACHINES=experiments/machines.toml; CONFIG=""; PAUSE=0; RATE=150; BURST_X=4; TOP_K=""
+LOCAL=0; ATTACH=0; MACHINES=experiments/machines.toml; CONFIG=""; PAUSE=0; RATE=150; BURST_X=4; TOP_K=""
 KNOB_NODE=2; KNOB_THREADS=16; SILENCE=coordinator; SILENCE_MS=15000; AUTO=1; KEEP=0; PREFLIGHT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --local) LOCAL=1 ;;
+    --attach) ATTACH=1; KEEP=1 ;;
     --machines) MACHINES=$2; shift ;;
     --config) CONFIG=$2; shift ;;
     --pause) PAUSE=1 ;;
@@ -61,12 +65,15 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ -z "$PREFLIGHT" ] && { [ $LOCAL = 1 ] && PREFLIGHT=0 || PREFLIGHT=1; }
+[ -z "$PREFLIGHT" ] && { [ $LOCAL = 1 ] || [ $ATTACH = 1 ] && PREFLIGHT=0 || PREFLIGHT=1; }
 
 if ! "$PYTHON" -c 'import sys, tomllib; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
   echo "Python 3.11+ is needed (set PYTHON=...)"; exit 2
 fi
-if [ $LOCAL = 1 ]; then
+if [ $ATTACH = 1 ]; then
+  [ -x target/release/rm-ctl ] || { echo "target/release/rm-ctl is missing: run cargo build --release"; exit 2; }
+  [ -n "$CONFIG" ] || { echo "--attach needs --config (the lab cluster config, e.g. config/lab.toml)"; exit 2; }
+elif [ $LOCAL = 1 ]; then
   for b in rm-node rm-loadgen rm-ctl; do
     [ -x "target/release/$b" ] || { echo "target/release/$b is missing: run cargo build --release"; exit 2; }
   done
@@ -77,7 +84,7 @@ else
 fi
 
 H=("$PYTHON" experiments/demo_helper.py)
-if [ $LOCAL = 1 ]; then H+=(--local); else H+=(--machines "$MACHINES"); fi
+if [ $LOCAL = 1 ]; then H+=(--local); elif [ $ATTACH = 0 ]; then H+=(--machines "$MACHINES"); fi
 [ -n "$CONFIG" ] && H+=(--base-config "$CONFIG")
 
 B=$'\033[1m'; R=$'\033[0m'
@@ -106,9 +113,16 @@ if [ $PREFLIGHT = 1 ]; then
   banner "Preflight" "Same commit, binaries built from it, clocks, ports, on every host."
   h preflight || { say "preflight refused (see above); --no-preflight skips it"; exit 1; }
 fi
-banner "Starting the cloud" "Three cloud nodes, one process each$([ $LOCAL = 1 ] && echo ' (here all on localhost)')."
-SETUP=(setup); [ -n "$TOP_K" ] && SETUP+=(--top-k "$TOP_K")
-h "${SETUP[@]}" || { cleanup; exit 1; }
+if [ $ATTACH = 1 ]; then
+  banner "The cloud" "Three cloud nodes, one process each on its own machine, and the load from
+three client machines, started on each machine (lab_run.py demo). This
+screen only watches them and sends rm-ctl commands."
+  h attach || { say "the cluster is not ready (see above): start lab_run.py demo on all six machines"; exit 1; }
+else
+  banner "Starting the cloud" "Three cloud nodes, one process each$([ $LOCAL = 1 ] && echo ' (here all on localhost)')."
+  SETUP=(setup); [ -n "$TOP_K" ] && SETUP+=(--top-k "$TOP_K")
+  h "${SETUP[@]}" || { cleanup; exit 1; }
+fi
 h status
 
 # ------------------------------------------------------------------ 1
@@ -120,6 +134,9 @@ Below, once a second: how many plans each node executed, its share, its
 machine's CPU and its planning queue. The split moves from second to second
 because each request is elected on the scores of that moment."
 pause
+if [ $ATTACH = 1 ]; then
+  h watch --secs 14
+else
 h load --rate "$RATE"   # until the demo stops it
 h watch --secs 8
 say "now a burst: +$BURST requests/s for ${BURST_S} s, $((RATE + BURST)) requests/s in total.
@@ -129,6 +146,7 @@ say "now a burst: +$BURST requests/s for ${BURST_S} s, $((RATE + BURST)) request
 h load --rate "$BURST" --secs "$BURST_S" --tag burst
 h watch --secs $((BURST_S + 4))   # the burst, its 3 s drain, and a second of quiet
 say "the burst is over: back to $RATE requests/s"
+fi
 
 # ------------------------------------------------------------------ 2
 banner "2. Load imbalance" \
@@ -194,7 +212,17 @@ fi
 h watch --secs 6 --mark "${VICTIM:-none}"
 
 # ------------------------------------------------------------------ 5
-if [ $AUTO = 1 ]; then
+if [ $AUTO = 1 ] && [ $ATTACH = 1 ]; then
+  banner "5. Automatic fault injection" \
+"The cloud injects failures by itself ([inject] enabled = true). On each
+cloud machine, stop the node (Ctrl-C) and start it again with
+  python3 experiments/lab_run.py demo --role cloudN --config $CONFIG --auto-inject
+(the clients keep running). Then watch: every 20-25 s the coordinator
+silences a node chosen from hash(seed, k) for 4-8 s."
+  pause
+  h attach || true
+  h watch --secs 60
+elif [ $AUTO = 1 ]; then
   banner "5. Automatic fault injection" \
 "The cloud now injects failures by itself ([inject] enabled = true): every
 20-25 s the coordinator picks a victim from hash(seed, k) and silences it for
