@@ -99,11 +99,20 @@ pub async fn run(args: FrontendArgs) -> io::Result<MachineSummary> {
 
     let mut failed = 0;
     let mut interrupted = false;
+    let worker_pids: Vec<u32> = children.iter().filter_map(|c| c.id()).collect();
     for child in &mut children {
         let status = tokio::select! {
             s = child.wait() => s?,
             _ = crate::stop_signal(), if !interrupted => {
                 interrupted = true;
+                // Pass the stop on: a SIGTERM reaches only this process (a
+                // terminal's Ctrl-C reaches the whole group), and a worker
+                // with no end time would otherwise run on.
+                for pid in &worker_pids {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-TERM", &pid.to_string()])
+                        .status();
+                }
                 eprintln!("stopping: workers are draining (Ctrl-C again to kill them)");
                 tokio::select! {
                     s = child.wait() => s?,
