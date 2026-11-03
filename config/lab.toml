@@ -15,19 +15,19 @@ wire_format = "postcard"   # "json" to read traffic while debugging
 
 [[cluster.nodes]]
 id = 1
-host = "10.7.57.XX1"  # cloud1: replace with its IP
+host = "10.7.57.238"  # cloud1
 port = 7000
 heartbeat_port = 7100
 
 [[cluster.nodes]]
 id = 2
-host = "10.7.57.XX2"  # cloud2: replace with its IP
+host = "10.7.57.126"  # cloud2
 port = 7000
 heartbeat_port = 7100
 
 [[cluster.nodes]]
 id = 3
-host = "10.7.57.XX3"  # cloud3: replace with its IP
+host = "10.7.57.193"  # cloud3
 port = 7000
 heartbeat_port = 7100
 
