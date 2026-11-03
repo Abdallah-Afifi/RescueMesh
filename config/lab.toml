@@ -27,7 +27,7 @@ heartbeat_port = 7100
 
 [[cluster.nodes]]
 id = 3
-host = "10.7.57.193"  # cloud3
+host = "10.7.57.254"  # cloud3
 port = 7000
 heartbeat_port = 7100
 
