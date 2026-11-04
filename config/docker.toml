@@ -1,0 +1,29 @@
+# The emulated lab in Docker (experiments/docker/lab.sh, docs/deployment.md
+# section 11): the three cloud containers' addresses on its private network.
+# Everything else takes the defaults, as in the lab.
+
+[run]
+run_id = "docker"
+seed = 1
+log_dir = "logs"
+
+[[cluster.nodes]]
+id = 1
+host = "172.30.0.11"
+port = 7000
+heartbeat_port = 7100
+
+[[cluster.nodes]]
+id = 2
+host = "172.30.0.12"
+port = 7000
+heartbeat_port = 7100
+
+[[cluster.nodes]]
+id = 3
+host = "172.30.0.13"
+port = 7000
+heartbeat_port = 7100
+
+[inject]
+enabled = false

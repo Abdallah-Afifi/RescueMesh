@@ -1,0 +1,25 @@
+# The emulated lab's machines (experiments/docker/lab.sh), for run_sweep.py
+# inside the controller container.
+repo_dir = "/root/RescueMesh"
+ssh_opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"]
+
+[[cloud]]
+id = 1
+ssh = "root@172.30.0.11"
+[[cloud]]
+id = 2
+ssh = "root@172.30.0.12"
+[[cloud]]
+id = 3
+ssh = "root@172.30.0.13"
+
+[[client]]
+machine = 1
+ssh = "root@172.30.0.21"
+[[client]]
+machine = 2
+ssh = "root@172.30.0.22"
+[[client]]
+machine = 3
+ssh = "root@172.30.0.23"
