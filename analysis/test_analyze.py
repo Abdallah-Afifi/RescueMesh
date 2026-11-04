@@ -343,6 +343,7 @@ def test_elections_are_counted_once_and_timed_from_the_first_pre_vote():
         run = one_run(tmp, injections=[(30, 3, 5000, 0)], extra=election_rows())
         el = analyze.elections(run)
         assert len(el) == 2 and el[0]["startup"] and not el[1]["startup"]
+        assert not el[0]["teardown"] and not el[1]["teardown"]
         e = el[1]
         assert abs(e["duration_s"] - 0.2) < 1e-6, e         # first pre_vote 30.4 -> won 30.6
         assert abs(e["from_suspect_s"] - 0.3) < 1e-6, e     # first suspect 30.3 -> 30.6
@@ -368,15 +369,22 @@ def test_false_suspicions_and_wrongful_removals():
              ev(35.5, "view_change", machine="cloud2", node=2, view=3, active=[1, 2, 3]),
              ev(36.0, "suspect", machine="cloud1", node=1, peer=3, phi=9.0),            # false: n3 was never silenced
              ev(50.0, "suspect", machine="cloud1", node=1, peer=2, phi=9.0),            # false
-             ev(50.1, "view_change", machine="cloud1", node=1, view=4, active=[1, 3])]  # wrongful
+             ev(50.1, "view_change", machine="cloud1", node=1, view=4, active=[1, 3]),  # wrongful
+             # After the clients stopped, the runner stops n1 first: not counted.
+             ev(3500.0, "suspect", machine="cloud2", node=2, peer=1, phi=9.0),
+             ev(3500.1, "view_change", machine="cloud2", node=2, view=5, active=[3])]
     for n in (1, 2, 3):
         extra += [ev(0, "resource_sample", machine=f"cloud{n}", node=n, scope="node"),
                   ev(3600, "resource_sample", machine=f"cloud{n}", node=n, scope="node")]
     with tempfile.TemporaryDirectory() as tmp:
-        s = analyze.suspicions(one_run(tmp, injections=[(30, 1, 5000, 1)], extra=extra))
+        run = one_run(tmp, injections=[(30, 1, 5000, 1)], extra=extra)
+        lo, hi = analyze.service_span(run)
+        assert hi < 3500, (lo, hi)
+        s = analyze.suspicions(run)
         assert s["suspects"] == 3 and s["false_suspects"] == 2, s
-        assert abs(s["node_hours"] - 3.0) < 0.01
-        assert abs(s["false_suspects_per_node_hour"] - 2 / 3) < 0.01
+        hours = 3 * (hi - lo) / 3600  # node time while the clients ran
+        assert abs(s["node_hours"] - hours) < 1e-6, s
+        assert abs(s["false_suspects_per_node_hour"] - 2 / hours) < 1e-6
         assert s["view_removals"] == 2 and s["wrongful_removals"] == 1, s
 
 
@@ -877,3 +885,20 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_an_election_after_the_clients_stopped_is_teardown():
+    """The runner stops the nodes after the load; when the coordinator goes
+    first the other two elect one. That is not an election of the run."""
+    extra = election_rows() + [
+        ev(3000.0, "suspect", machine="cloud1", node=1, peer=2, phi=9.0),
+        ev(3000.1, "election_start", machine="cloud3", node=3, epoch=3, phase="pre_vote"),
+        ev(3000.2, "election_won", machine="cloud3", node=3, epoch=3),
+        ev(3000.2, "step_down", machine="cloud2", node=2, epoch=3)]
+    with tempfile.TemporaryDirectory() as tmp:
+        run = one_run(tmp, injections=[(30, 3, 5000, 0)], extra=extra)
+        el = analyze.elections(run)
+        assert [e["teardown"] for e in el] == [False, False, True]
+        c = analyze.counters(run)
+        assert c["elections"] == 3 and c["elections_after_startup"] == 1 and c["elections_teardown"] == 1, c
+        assert c["step_down"] == 0 and c["suspect"] == 2, c

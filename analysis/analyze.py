@@ -324,6 +324,20 @@ def load_span(run: Run) -> tuple[float, float]:
     return float(s.t.min()), float(s.t.max())
 
 
+def service_span(run: Run) -> tuple[float, float]:
+    """(first client send, last client event): while the clients were running.
+
+    Outside it the runner is starting the nodes one by one, or stopping them
+    one by one after the load (a coordinator stopped first is suspected and
+    replaced by the other two). Counts of suspicions, view removals, step-downs
+    and elections are taken inside it, so they do not count the harness's own
+    starts and stops. Unbounded when the run has no client events."""
+    c = run.ev[run.ev.kind.isin(["client_send", "client_reply", "client_retry"])]
+    if c.empty:
+        return -math.inf, math.inf
+    return float(c.t.min()), float(c.t.max())
+
+
 def measure_span(run: Run) -> tuple[float, float]:
     """(first, last) first-attempt send in the measured window; the node log span without clients."""
     s = run.ev[(run.ev.kind == "client_send") & (run.ev.phase == "measure")]
@@ -698,6 +712,8 @@ def elections(run: Run, max_election_s=10.0, trigger_s=10.0) -> list[dict]:
       `suspect` of it by a peer, both looked for in the `trigger_s` before
       the start. The first election of a run has no previous coordinator and
       is marked `startup`.
+    * teardown: it started after the clients stopped (`service_span`), when
+      the runner was stopping the nodes.
     """
     ev = run.ev
     won = ev[ev.kind == "election_won"].sort_values("t")
@@ -710,6 +726,7 @@ def elections(run: Run, max_election_s=10.0, trigger_s=10.0) -> list[dict]:
         pre = starts
     inj = ev[ev.kind == "inject_start"]
     sus = ev[ev.kind == "suspect"]
+    _, t_served = service_span(run)
     out, prev_t, prev_coord = [], -math.inf, None
     for _, w in won.iterrows():
         cand = pre[(pre.t <= w.t) & (pre.t > max(prev_t, w.t - max_election_s))]
@@ -719,6 +736,7 @@ def elections(run: Run, max_election_s=10.0, trigger_s=10.0) -> list[dict]:
                "duration_s": float(w.t - t_start) if len(cand) else float("nan"),
                "pre_vote_starts": len(cand), "prev_coordinator": prev_coord}
         ref = t_start if len(cand) else float(w.t)
+        row["teardown"] = ref > t_served
         if prev_coord is not None:
             lo = max(prev_t, ref - trigger_s)
             i = inj[(num(inj.victim) == prev_coord) & (inj.t >= lo) & (inj.t <= ref)]
@@ -751,7 +769,9 @@ def node_samples(run: Run) -> pd.DataFrame:
 
 def counters(run: Run) -> dict:
     ev = run.ev
-    n = lambda k: int((ev.kind == k).sum())  # noqa: E731
+    s_lo, s_hi = service_span(run)
+    served = (ev.t >= s_lo) & (ev.t <= s_hi)
+    n = lambda k: int(((ev.kind == k) & served).sum())  # noqa: E731
     row = run.ident()
     for k in ["step_down", "suspect", "replan", "duplicate_suppressed", "busy", "commit"]:
         row[k] = n(k)
@@ -760,13 +780,15 @@ def counters(run: Run) -> dict:
     row["injections_outside_window"] = int((~inj.in_window).sum()) if len(inj) else 0
     vt = view_table(run)
     row["views"] = len(vt)
-    row["view_changes"] = max(len(vt) - 1, 0)  # distinct views after the first one
+    # Distinct views after the first one, installed while the clients ran.
+    row["view_changes"] = int(((vt.t >= s_lo) & (vt.t <= s_hi)).iloc[1:].sum()) if len(vt) else 0
     el = pd.DataFrame(elections(run))
     starts = ev[ev.kind == "election_start"]
     row["election_attempts"] = int((starts.phase == "pre_vote").sum()) if starts.phase.notna().any() else len(starts)
     row["elections"] = len(el)
-    later = el[~el.startup] if len(el) else el
+    later = el[~el.startup & ~el.teardown] if len(el) else el
     row["elections_after_startup"] = len(later)
+    row["elections_teardown"] = int(el.teardown.sum()) if len(el) else 0
     lo, hi = measure_span(run)
     minutes = (hi - lo) / 60 if hi > lo else float("nan")
     if len(el):
@@ -810,23 +832,29 @@ def suspicions(run: Run, pre_s=5.0, grace_s=2.0, tol_s=0.5) -> dict:
     injection of P with t0 - tol_s <= t <= max(t0 + pre_s, t_end + grace_s),
     i.e. an `inject_start` of P in the preceding `pre_s`, or during P's
     silence, plus `grace_s` for the detector and `tol_s` for clock error.
-    Every other suspicion is false. Rates are per node-hour of logged node
-    time. A view that drops a node that was not silenced is a wrongful removal.
+    Every other suspicion is false. A view that drops a node that was not
+    silenced is a wrongful removal. Both are counted while the clients ran
+    (`service_span`), not while the runner was starting or stopping the
+    nodes; rates are per node-hour of that span.
     """
     ev = run.ev
     inj = injections(run)
+    s_lo, s_hi = service_span(run)
 
     def silenced(p, t) -> bool:
         x = inj[num(inj.victim) == p]
         return bool(((x.t0 - tol_s <= t) & (t <= np.maximum(x.t0 + pre_s, x.t_end + grace_s))).any())
 
-    sus = ev[(ev.kind == "suspect") & ev.peer.notna()]
+    sus = ev[(ev.kind == "suspect") & ev.peer.notna() & (ev.t >= s_lo) & (ev.t <= s_hi)]
     false = [r for _, r in sus.iterrows() if not silenced(float(r.peer), float(r.t))]
     nodes = pd.concat([ev.loc[ev.node.notna(), ["node", "t"]], run.rs.loc[run.rs.node.notna(), ["node", "t"]]])
-    hours = sum(float(g.t.max() - g.t.min()) for _, g in nodes.groupby("node")) / 3600
+    hours = sum(max(min(float(g.t.max()), s_hi) - max(float(g.t.min()), s_lo), 0.0)
+                for _, g in nodes.groupby("node")) / 3600
     vt = view_table(run)
     removals, wrongful = 0, 0
     for i in range(1, len(vt)):
+        if not s_lo <= float(vt.t.iloc[i]) <= s_hi:
+            continue
         gone = set(vt.active.iloc[i - 1]) - set(vt.active.iloc[i])
         for p in gone:
             removals += 1
@@ -1548,7 +1576,7 @@ def main(argv=None) -> int:
     t["aggregate"] = agg
     t["failures_by_config"] = failures_by_config(fails)
     t["phases_by_config"] = seed_ci(phases, ["label", "phase"], ["throughput", "mean_ms", "p50_ms", "p99_ms"])
-    later = elec[~elec.startup.astype(bool)] if len(elec) else elec
+    later = elec[~elec.startup.astype(bool) & ~elec.teardown.astype(bool)] if len(elec) else elec
     t["elections_by_config"] = seed_ci(later, ["label"], ["duration_s", "from_suspect_s", "from_inject_s"])
     t["imbalance_by_config"] = seed_ci(imb, ["label", "node"], ["share_before", "share_during", "share_after"])
     t["counters_by_config"] = seed_ci(cnt, ["label"], [
