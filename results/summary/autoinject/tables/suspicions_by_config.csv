@@ -1,0 +1,3 @@
+sweep,label,node_hours,suspects,false_suspects,view_removals,wrongful_removals,false_suspects_per_node_hour,wrongful_removals_per_node_hour
+autoinject,auto-r1000,0.4584487790891667,30,0,15,0,0.0,0.0
+autoinject,auto-r200,0.458390138685,30,0,15,0,0.0,0.0

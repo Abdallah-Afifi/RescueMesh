@@ -30,3 +30,6 @@ __pycache__/
 /config/cluster.toml
 /experiments/machines.toml
 /.docker-lab-keys/
+# One resource plot per run: regenerate with analysis/analyze.py
+/results/summary/*/figures/resources_*.png
+/results/summary-*.log

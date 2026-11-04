@@ -1,0 +1,13 @@
+sweep,label,node_hours,suspects,false_suspects,view_removals,wrongful_removals,false_suspects_per_node_hour,wrongful_removals_per_node_hour
+clients,hash-u10,0.16700766114333332,0,0,0,0,0.0,0.0
+clients,hash-u100,0.16867669676833333,0,0,0,0,0.0,0.0
+clients,hash-u200,0.17051100100583333,0,0,0,0,0.0,0.0
+clients,hash-u25,0.16736691964916667,0,0,0,0,0.0,0.0
+clients,hash-u5,0.16690924503166665,0,0,0,0,0.0,0.0
+clients,hash-u50,0.16776259670916666,0,0,0,0,0.0,0.0
+clients,mwbe-u10,0.16700432137333335,0,0,0,0,0.0,0.0
+clients,mwbe-u100,0.16893799202249998,0,0,0,0,0.0,0.0
+clients,mwbe-u200,0.1703713493838889,0,0,0,0,0.0,0.0
+clients,mwbe-u25,0.16727710106083335,0,0,0,0,0.0,0.0
+clients,mwbe-u5,0.16684949337666666,0,0,0,0,0.0,0.0
+clients,mwbe-u50,0.16778689405833336,0,0,0,0,0.0,0.0

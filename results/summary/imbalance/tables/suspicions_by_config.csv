@@ -1,0 +1,7 @@
+sweep,label,node_hours,suspects,false_suspects,view_removals,wrongful_removals,false_suspects_per_node_hour,wrongful_removals_per_node_hour
+imbalance,hash-knob,0.29174343073666664,0,0,0,0,0.0,0.0
+imbalance,mwbe-cpuonly-knob,0.2917330058866667,0,0,0,0,0.0,0.0
+imbalance,mwbe-knob,0.29173399472916667,0,0,0,0,0.0,0.0
+imbalance,mwbe-queueonly-knob,0.2917389724733333,0,0,0,0,0.0,0.0
+imbalance,mwbe-rttonly-knob,0.29172191807583336,0,0,0,0,0.0,0.0
+imbalance,mwbe-serviceonly-knob,0.2917427286541666,0,0,0,0,0.0,0.0

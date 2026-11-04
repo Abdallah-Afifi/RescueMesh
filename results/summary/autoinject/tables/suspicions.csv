@@ -1,0 +1,11 @@
+run,sweep,label,seed,node_hours,suspects,false_suspects,false_suspects_per_node_hour,false_suspect_detail,view_removals,wrongful_removals,wrongful_removals_per_node_hour
+autoinject-auto-r1000-s1,autoinject,auto-r1000,1,0.0916896016975,6,0,0.0,,3,0,0.0
+autoinject-auto-r1000-s2,autoinject,auto-r1000,2,0.09169104558666669,6,0,0.0,,3,0,0.0
+autoinject-auto-r1000-s3,autoinject,auto-r1000,3,0.09170003879250001,6,0,0.0,,3,0,0.0
+autoinject-auto-r1000-s4,autoinject,auto-r1000,4,0.09167911273916667,6,0,0.0,,3,0,0.0
+autoinject-auto-r1000-s5,autoinject,auto-r1000,5,0.09168898027333335,6,0,0.0,,3,0,0.0
+autoinject-auto-r200-s1,autoinject,auto-r200,1,0.09167114270416668,6,0,0.0,,3,0,0.0
+autoinject-auto-r200-s2,autoinject,auto-r200,2,0.09168856032083333,6,0,0.0,,3,0,0.0
+autoinject-auto-r200-s3,autoinject,auto-r200,3,0.09168096301666667,6,0,0.0,,3,0,0.0
+autoinject-auto-r200-s4,autoinject,auto-r200,4,0.09167885756583334,6,0,0.0,,3,0,0.0
+autoinject-auto-r200-s5,autoinject,auto-r200,5,0.09167061507749999,6,0,0.0,,3,0,0.0

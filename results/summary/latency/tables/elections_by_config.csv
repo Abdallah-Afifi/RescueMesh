@@ -1,0 +1,2 @@
+sweep,label,seeds,duration_s,duration_s_ci95,from_suspect_s,from_suspect_s_ci95,from_inject_s,from_inject_s_ci95
+latency,highestid-r1500,1,4.291485001999995,,4.838000111999996,,,

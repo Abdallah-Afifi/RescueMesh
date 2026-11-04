@@ -1,0 +1,7 @@
+sweep,label,node_hours,suspects,false_suspects,view_removals,wrongful_removals,false_suspects_per_node_hour,wrongful_removals_per_node_hour
+failure,coord-r1000,0.25013790270749997,10,0,5,0,0.0,0.0
+failure,coord-r200,0.25005454003500005,10,0,5,0,0.0,0.0
+failure,coord-r500,0.2500557818058333,10,0,5,0,0.0,0.0
+failure,rank1-r1000,0.25009811205000004,10,0,5,0,0.0,0.0
+failure,rank1-r200,0.25004717118166664,10,0,5,0,0.0,0.0
+failure,rank1-r500,0.2500775617375,10,0,5,0,0.0,0.0

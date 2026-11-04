@@ -1,0 +1,5 @@
+sweep,label,node_hours,suspects,false_suspects,view_removals,wrongful_removals,false_suspects_per_node_hour,wrongful_removals_per_node_hour
+planner,topk10,0.16672494639583332,0,0,0,0,0.0,0.0
+planner,topk100,0.16673392325916667,0,0,0,0,0.0,0.0
+planner,topk200,0.16673762784416668,0,0,0,0,0.0,0.0
+planner,topk50,0.1667241895783333,0,0,0,0,0.0,0.0

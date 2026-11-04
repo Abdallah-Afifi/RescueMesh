@@ -1,0 +1,11 @@
+sweep,label,node_hours,suspects,false_suspects,view_removals,wrongful_removals,false_suspects_per_node_hour,wrongful_removals_per_node_hour
+weights,cpuonly-r1000,0.16677514489333334,0,0,0,0,0.0,0.0
+weights,cpuonly-r500,0.16673928209083333,0,0,0,0,0.0,0.0
+weights,equal-r1000,0.16677592441666667,0,0,0,0,0.0,0.0
+weights,equal-r500,0.16675036051749997,0,0,0,0,0.0,0.0
+weights,queueonly-r1000,0.16674879072500004,0,0,0,0,0.0,0.0
+weights,queueonly-r500,0.16674010770416667,0,0,0,0,0.0,0.0
+weights,rttonly-r1000,0.16678214691666665,0,0,0,0,0.0,0.0
+weights,rttonly-r500,0.16673750440500001,0,0,0,0,0.0,0.0
+weights,serviceonly-r1000,0.16680718398916666,0,0,0,0,0.0,0.0
+weights,serviceonly-r500,0.1667276953425,0,0,0,0,0.0,0.0
