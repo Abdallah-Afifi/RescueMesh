@@ -839,3 +839,20 @@ Entries DL-066 to DL-070 record the fixes from the pre-deployment review of 2026
   - A slot's timing is fixed, not adaptive: a run that needs longer than its slot is cut at the slot's end.
   - A machine that misses its start skips the runs already begun, and `collect` reports them as missing.
 - Evidence: all six roles run as separate processes on one machine with the smoke sweep, then pack, collect and analyse: the silences, the load knob and the recovery were all measured, as with `run_sweep.py`. `demo.sh --attach` ran scenarios 1–4 against hand-started roles. `experiments/test_lab_run.py` covers the timetable's determinism and non-overlap, placeholder addresses, and collection (including a run parked because its cluster was not ready).
+
+## DL-077. Measurements in an emulated lab; claims logged after re-admission; no reads while catching up
+
+- Date: 2026-11-04. Status: agreed. Owner: Abdallah.
+- Problem: the lab is not available long enough before the deadline to run the full sweeps there (about 7 hours at 5 seeds).
+- Decision: the sweeps run in an emulated lab on one laptop (`experiments/docker/lab.sh`), at commit `be3cf4e`:
+  - six containers (Ubuntu 24.04, as in the lab), one per machine role, and a controller, on one private network (172.30.0.0/24, `config/docker.toml`);
+  - each machine's container adds 1.65 ± 0.35 ms (normal) to every packet it sends (`tc netem`). The measured round trip between containers is 3.56 ms; the lab's is 3.3 ms;
+  - a CPU quota of 3 CPUs per container (`CLOUD_CPUS=3 CLIENT_CPUS=3`, on an 18-core host), so nodes and clients do not take each other's CPU;
+  - an ssh server in each container, so `run_sweep.py` and the analysis run unchanged, with `experiments/machines.docker.toml`.
+- Limits:
+  - The containers share one host's kernel, memory bus and clock. Clock offsets are near zero, smaller than in the lab (timesyncd, a few ms), so the one-way delays measured across machines are more exact here than they would be in the lab.
+  - The delay is added on send only, with no loss and no switch queueing; the lab's wired network has neither under this load.
+  - The demo and a short confirmation run use the real lab (`lab_run.py`, DL-076).
+- Found while analysing the failure sweep, and fixed after it (not in the measured binaries; neither changes a measured number):
+  - **Claims logged before `active`.** A node re-admitted to the view claims its held requests in the same step. The view was handed to selection while the batch was being applied, before the core logged `active`, so the claims came a few microseconds before it. The analysis counted them as work before converging. Views now go to selection after the batch, so `active` comes first. For runs measured before this change, the analysis ignores claims in the last 2 ms before `active`. With that, every run shows no work before converging.
+  - **Reads while catching up.** A node that was not ACTIVE still answered reads from its applied state, which may be behind. It now leaves them to its peers, which got the same request, as it already did for writes.

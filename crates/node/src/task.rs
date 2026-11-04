@@ -307,6 +307,12 @@ impl NodeTask {
         }
         if !req.req.op.is_write() {
             // Reads come from applied state and never enter selection (DL-019).
+            // A node that is not ACTIVE (catching up after a silence, or out
+            // of the view) leaves them to its peers, which got the same
+            // request: its state may be behind (DL-077).
+            if !self.core.is_active() {
+                return self.take();
+            }
             let result = self.state.query(&req.req);
             self.out.push(Out::Reply {
                 req: id,
@@ -497,19 +503,14 @@ impl NodeTask {
 
     fn dispatch_core(&mut self, now: u64, actions: Vec<CoreAction>) {
         let mut applied = false;
+        let mut views = Vec::new();
         for a in actions {
             match a {
                 CoreAction::Send { to, msg } => self.out.push(Out::Send { to, msg }),
                 CoreAction::Apply(entry) => {
                     applied = true;
                     if let EntryKind::View(v) = &entry.kind {
-                        // Every view, not only the batch's last: a node that
-                        // left and rejoined within one batch must count as a
-                        // new member, or its old claims stay valid (DL-046).
-                        let s = self
-                            .selector
-                            .set_view(now, v.clone(), self.core.is_active());
-                        self.dispatch_selection(s);
+                        views.push(v.clone());
                     }
                     self.state.apply(&entry);
                     if let EntryKind::Result { req, result, .. } = &entry.kind {
@@ -534,6 +535,15 @@ impl NodeTask {
                     self.out.push(Out::Event { kind, req, fields })
                 }
             }
+        }
+        // Every view, not only the batch's last: a node that left and
+        // rejoined within one batch must count as a new member, or its old
+        // claims stay valid (DL-046). After the batch's own events, so the
+        // claims a re-admitted node makes are logged after its `active`
+        // (DL-077).
+        for v in views {
+            let s = self.selector.set_view(now, v, self.core.is_active());
+            self.dispatch_selection(s);
         }
         if applied {
             // Publish once per batch. The slot holds it weakly, so the state

@@ -610,7 +610,10 @@ def convergence(run: Run, victim, t_end: float, t_active: float) -> dict:
     position at waking) to `active` (applied position when re-admitted), and
     whether it did any work in between. A node must not plan or claim before
     it has converged (protocol recovery rule); `worked_before_active` counts
-    the `plan_end` and `claim` events it logged in that interval."""
+    the `plan_end` and `claim` events it logged in that interval, except in
+    the last 2 ms: the node claims its held requests in the same step that
+    re-admits it, and before DL-077 those claims were logged a few
+    microseconds before the `active` event of that step."""
     ev = run.ev
     mine = ev[(ev.node == victim) & (ev.t >= t_end)]
     out = {"sync_s": math.nan, "catch_up_entries": math.nan, "worked_before_active": 0}
@@ -622,7 +625,7 @@ def convergence(run: Run, victim, t_end: float, t_active: float) -> dict:
         if len(act) and pd.notna(act.applied.iloc[0]) and pd.notna(s0.last_seq):
             out["catch_up_entries"] = float(act.applied.iloc[0] - s0.last_seq)
     if t_active == t_active:
-        out["worked_before_active"] = int((mine.kind.isin(["plan_end", "claim"]) & (mine.t < t_active)).sum())
+        out["worked_before_active"] = int((mine.kind.isin(["plan_end", "claim"]) & (mine.t < t_active - 0.002)).sum())
     return out
 
 
