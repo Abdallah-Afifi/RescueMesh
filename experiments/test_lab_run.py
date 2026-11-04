@@ -43,7 +43,10 @@ def test_start_times_parse():
 
 
 def test_a_placeholder_address_is_a_problem():
-    cfg = tomllib.loads((REPO / "config/lab.toml").read_text())
+    # A config still holding the template's placeholders, whatever the real
+    # config/lab.toml says by now.
+    cfg = {"cluster": {"nodes": [{"id": i, "host": f"10.7.57.XX{i}", "port": 7000, "heartbeat_port": 7100}
+                                 for i in (1, 2, 3)]}}
     probs = lab_run.role_problems("client1", cfg)
     assert probs and "IPv4" in probs[0]
     assert lab_run.role_problems("cloud1", LOCAL) == []  # 127.0.0.1 is this machine
